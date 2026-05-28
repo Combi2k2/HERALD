@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "herald"
+version = "0.1.0"
+description = "Site-scale semantic navigation framework"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.28",
+    "shapely>=2.0",
+    "pyproj>=3.6",
+    "numpy>=1.26",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+viz = [
+    "folium>=0.18",
+]
+viewer = [
+    "rerun-sdk>=0.20",
+]
+
+[tool.uv]
+default-groups = ["dev", "viz"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["herald*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
