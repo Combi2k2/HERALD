@@ -73,25 +73,17 @@ client = OSMClient()
 result = client.query_nearby(loc.lat, loc.lon, radius_m=200)
 ```
 
-### Inspect query results (save + map)
+### Inspect query results (Python)
 
-Set the query center with `--lat` / `--lon` or `HERALD_LAT` / `HERALD_LON`:
+```python
+from herald.data import RunPaths
 
-```bash
-export HERALD_LAT=48.7128
-export HERALD_LON=2.2060
-uv run python scripts/osm_inspect.py
-# manual override:  --lat 48.71 --lon 2.21
-# radius / output:   --radius-m 300 --out-dir data/osm
+paths = RunPaths()
+print(paths.run_id)   # e.g. 010626_135959
+print(paths.root)     # data/010626_135959
+print(paths.raw)      # data/010626_135959/raw
+print(paths.phase1)   # data/010626_135959/phase1
 ```
-
-Writes to `data/osm/`:
-
-| File | Contents |
-|------|----------|
-| `features.geojson` | All geometries (reloadable) |
-| `metadata.json` | Summary + per-feature tags |
-| `map.html` | Interactive Folium map (open in a browser) |
 
 ### Notes
 
@@ -104,24 +96,27 @@ Writes to `data/osm/`:
 Build a hierarchical scene graph from OpenStreetMap: **site → outdoor zones → building zones**, with pathway-based outdoor partitioning.
 
 ```bash
-uv sync --group dev --group viz --group viewer
+uv sync --group dev --group viz --group vlm --group viewer
 export HERALD_LAT=48.7128 HERALD_LON=2.2060   # optional fallback if GPS denied
 uv run python scripts/scene_init.py --rerun --serve   # browser GPS → picker → overlay
+uv run python scripts/scene_init.py --vlm          # vision LLM per polygon (aerial + OSM map)
+uv run python scripts/scene_init.py --vlm --vlm-model openai:gpt-4o  # proprietary model via LangChain
 uv run python scripts/scene_init.py --port 8080 --serve   # default is 3000
 uv run python scripts/scene_init.py --center 48.7128,2.2060 --serve
 uv run python scripts/scene_init.py --bbox 48.710,2.200,48.713,2.203 --serve  # skip picker
-uv run python scripts/scene_view.py             # replay saved graph in Rerun
+uv run python scripts/scene_view.py --run-id 010626_135959
 ```
 
-Writes to `data/scene/current/` by default:
+Writes one run folder (timestamp id ``ddmmyy_hhmmss``)::
 
-| File | Contents |
-|------|----------|
-| `scene_graph.json` | Site/outdoor/building nodes, captions, stub embeddings |
-| `roi.geojson` | Selected region of interest |
-| `pathways.geojson` | Walkable highways used for outdoor partitioning |
-| `osm_polygons.geojson` | All raw OSM polygon footprints (landuse, leisure, amenity, …) |
-| `map_overlay.html` | Folium map: OSM tiles + polygon overlays (layout check) |
-| `metadata.json` | Node counts, OSM polygon counts by tag, timing, model id |
-
-Use `--run-id <name>` to snapshot under `data/scene/<name>/` instead of overwriting `current/`.
+```
+data/{run_id}/
+├── raw/
+│   ├── roi.geojson
+│   ├── osm.geojson
+│   └── map_overlay.html
+└── phase1/
+    ├── scene_graph.json
+    ├── pathways.geojson
+    └── metadata.json
+```

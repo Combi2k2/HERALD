@@ -13,11 +13,19 @@ dependencies = [
     "shapely>=2.0",
     "pyproj>=3.6",
     "numpy>=1.26",
+    "pydantic>=2.0",
+    "pillow>=10.0",
+    "tqdm>=4.66",
 ]
 
 [dependency-groups]
 dev = [
     "pytest>=8.0",
+]
+vlm = [
+    "langchain>=0.3",
+    "langchain-core>=0.3",
+    "langchain-ollama>=0.2",
 ]
 viz = [
     "folium>=0.18",
@@ -27,11 +35,11 @@ viewer = [
 ]
 
 [tool.uv]
-default-groups = ["dev", "viz"]
+default-groups = ["dev", "viz", "vlm"]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["herald*"]
+include = ["herald*", "services*", "utils*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

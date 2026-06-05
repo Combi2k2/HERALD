@@ -37,6 +37,35 @@ path = nx.shortest_path(G_walk, source, target, weight="length")
 **Deliverable**: Site node + Zone nodes populated with geometry, text descriptions,
 and CLIP embeddings. Pathway network stored as networkx graph for later nav graph construction.
 
+**Status (branch `SG-offline-init`)**: Implemented via `herald/scene/` + `scripts/scene_init.py`
+— Overpass polygon fetch, pathway-based outdoor partition, ROI picker UI, Rerun/Folium
+validation. Embeddings use `StubEncoder` until CLIP is wired.
+
+---
+
+### Priority 1b — Tag-driven scene graph layout (next on this branch)
+
+**Goal**: Use OSM polygon tags already fetched in `osm_polygons.geojson` to improve
+offline zone naming and structure, instead of anonymous geometric outdoor blobs.
+
+**Findings from IP Paris ROI** (~478 polygons):
+
+| Signal | ~Count | Use |
+|--------|--------|-----|
+| `building=*` | 164 | Structure nodes (already used) |
+| `landuse` / `natural` / `leisure` | 173 | Semantic labels for outdoor zones |
+| `amenity` (mostly parking) | 39 | Facility / obstacle polygons |
+| Truly untagged | 38 | Cadastre footprints — infer via neighbour voting + geometry |
+| Misleading `primary_tag` | ~41 | Alphabetical first key (`addr:*`, `access`, `source`) — do not use for logic |
+
+**Planned changes**:
+1. `classify_polygon_role(tags)` with priority: `building → landuse → leisure → natural → amenity → highway → man_made → barrier`; skip metadata keys (`source`, `check_date`, `addr:*`).
+2. Label geometric outdoor zones by dominant overlapping `landuse`/`leisure`/`natural` polygon (replace `outdoor_003`-style ids in captions).
+3. Untagged inference ladder (no ML first): neighbour tag voting + cadastre-default `building=yes`; optional CLIP-on-tile for low-confidence polygons only.
+4. Extend `SceneNode` with optional `osm_tags`, `semantic_label`, `confidence` (backward-compatible JSON).
+
+**Module**: `herald/scene/osm_tags.py` + updates to `partition.py` / `init.py`.
+
 ---
 
 ### Priority 2 — Online Object Node Refinement (ConceptGraphs real-time branch)
@@ -59,6 +88,18 @@ SAM2 segmentation + CLIP embeddings + 3D projection.
 
 **Deliverable**: Object nodes (`V_O`) continuously updated during exploration,
 with stable embeddings and 3D positions.
+
+**Planned module**: `herald/refinement/` — recorded RGB-D input first (frame folder:
+`rgb/`, `depth/`, `poses.json` + `calib.json`), not live sim initially.
+
+**Pipeline sketch**:
+- `FrameSource` → SAM2 masks → CLIP crops → project to `LocalFrame` centroids
+- Spatial gating (`r`) + cosine match (`τ`) + EMA merge → `object` nodes under parent zone
+- Periodic DBSCAN → `functional_area` nodes; temporal displacement filter for dynamic objects
+- Extend graph levels: `functional_area`, `object`, `ego`; store embeddings in sidecar `embeddings.npz`
+- CLI: `scripts/refine_scene.py --graph … --frames …`
+
+**Phases**: R1 stub segmenter + match logic → R2 SAM2/CLIP → R3 clustering/dynamic filter → R4 checkpoint + Rerun events.
 
 ---
 
@@ -165,6 +206,28 @@ Hybrid re-ranking when robot pose is available:
 
 **Deliverable**: End-to-end query → waypoint sequence pipeline.
 
+**Planned module**: `herald/planner/` — LLM decomposition from Phase 1 (OpenAI-compatible API).
+
+**Components**:
+- `decompose.py`: query + robot context → `{keyframes: [{zone, area, object}, …]}`
+- `retrieve.py` + `index.py`: top-down hierarchical CLIP search constrained by parent subtree; hybrid spatial re-rank when pose available
+- `nav_graph.py`: `pathways.geojson` → networkx backbone; Voronoi augment in open outdoor zones; store `nav_graph.graphml`
+- `plan.py`: keyframes → resolved nodes → nearest waypoints → Dijkstra segments → coarse waypoint list
+- `experience.py`: lower edge costs on previously traversed paths (ego nodes)
+- CLI: `scripts/plan_query.py --graph … --query "…"`
+
+**Graph level mapping** (report ↔ code):
+
+| Report | Offline init today | After refinement |
+|--------|-------------------|------------------|
+| V_S | `site` | unchanged |
+| V_Z | `outdoor_region`, `building` | + OSM semantic labels |
+| V_A | — | `functional_area` |
+| V_O | — | `object` |
+| V_ego | — | `ego` |
+
+**Phases**: P1 LLM + zone retrieval → P2 nav graph + Dijkstra → P3 Voronoi + experience weights → P4 area/object retrieval once refinement populates graph.
+
 ---
 
 ## Tool Stack Summary
@@ -216,9 +279,12 @@ Hybrid re-ranking when robot pose is available:
 
 ## Experiment Sequence
 
-1. Validate OSM initialization on IP Paris campus (osmnx → zone nodes + nav graph)
-2. Validate online refinement on Habitat-Sim (extending current HOV-SG experiments)
-3. Validate FAISS retrieval matches brute-force baseline
-4. Validate Voronoi nav graph covers open-space gaps in OSM data
-5. End-to-end: natural language query → waypoint sequence on Habitat-Sim
-6. Real-world onboarding phase on IP Paris campus (teleoperation)
+1. **Done (SG-offline-init)**: OSM ROI fetch, scene graph init, pathway partition, UI + Rerun validation
+2. Tag-driven outdoor zone labeling + untagged polygon inference (Priority 1b)
+3. Nav graph from `pathways.geojson` + connectivity check (Planner P2)
+4. LLM query decomposition + zone-level hierarchical retrieval (Planner P1)
+5. Recorded RGB-D refinement → object nodes (`herald/refinement/`, Refinement R2)
+6. Functional area clustering + area/object retrieval (R3 + Planner P4)
+7. Voronoi nav augmentation + experience-based edge weights (Priority 4 + Planner P3)
+8. End-to-end: natural language query → waypoint sequence on recorded pose stream
+9. Real-world teleop onboarding on IP Paris campus (future)

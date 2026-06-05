@@ -1,9 +1,6 @@
-# Generated OSM query outputs (re-run scripts/osm_inspect.py to recreate)
-data/osm/*
-!data/osm/.gitkeep
-# Scene graph artifacts (re-run scripts/scene_init.py to recreate)
-data/scene/*
-!data/scene/.gitkeep
+# Generated datasets (re-run scripts/scene_init.py to recreate)
+data/*
+!data/.gitkeep
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
