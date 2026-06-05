@@ -10,8 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from herald.browser import open_browser as launch_browser
-from herald.scene.graph import SceneGraph
-from herald.scene.roi import ROI
+from herald.scene.common.graph import SceneGraph
+from herald.scene.common.roi import ROI
 from herald.ui.roi_picker import ROIPickerError
 
 # Hex colors keyed by common OSM primary tags (matches Rerun palette loosely)
