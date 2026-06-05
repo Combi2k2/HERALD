@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal
 
-from herald.scene.frame import LocalFrame
+from herald.scene.common.frame import LocalFrame
 
 NodeLevel = Literal["site", "outdoor_region", "building"]
 ZoneKind = Literal["outdoor_region", "building"]
@@ -22,9 +22,11 @@ HeightSource = Literal["osm_height_tag", "osm_levels", "default"]
 SceneEventKind = Literal[
     "roi_resolved",
     "partition_computed",
+    "pipeline_status",
     "zone_node_created",
     "containment_inferred",
     "embedding_attached",
+    "pathways_ready",
     "pipeline_complete",
 ]
 
@@ -48,9 +50,16 @@ class SceneNode:
     height_m: float = 10.0
     height_source: HeightSource = "default"
     osm_id: int | None = None
+    role: str | None = None
+    category: str | None = None
+    function: str | None = None
+    name: str | None = None
+    confidence: float | None = None
+    classification_source: str | None = None
+    osm_tags: dict[str, str] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "id": self.id,
             "level": self.level,
             "zone_kind": self.zone_kind,
@@ -61,6 +70,21 @@ class SceneNode:
             "height_source": self.height_source,
             "osm_id": self.osm_id,
         }
+        if self.role is not None:
+            payload["role"] = self.role
+        if self.category is not None:
+            payload["category"] = self.category
+        if self.function is not None:
+            payload["function"] = self.function
+        if self.name:
+            payload["name"] = self.name
+        if self.confidence is not None:
+            payload["confidence"] = self.confidence
+        if self.classification_source is not None:
+            payload["classification_source"] = self.classification_source
+        if self.osm_tags:
+            payload["osm_tags"] = self.osm_tags
+        return payload
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SceneNode:
@@ -75,6 +99,13 @@ class SceneNode:
             height_m=float(data.get("height_m", 10.0)),
             height_source=data.get("height_source", "default"),
             osm_id=data.get("osm_id"),
+            role=data.get("role"),
+            category=data.get("category"),
+            function=data.get("function"),
+            name=data.get("name"),
+            confidence=data.get("confidence"),
+            classification_source=data.get("classification_source"),
+            osm_tags=data.get("osm_tags"),
         )
 
 
@@ -109,6 +140,7 @@ class SceneGraph:
     edges: list[SceneEdge] = field(default_factory=list)
     point_cloud_uri: str | None = None
     roi_area_m2: float | None = None
+    schema_version: int = 2
 
     def add_node(self, node: SceneNode) -> None:
         self.nodes.append(node)
@@ -132,6 +164,7 @@ class SceneGraph:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "schema_version": self.schema_version,
             "site_id": self.site_id,
             "frame_origin": self.frame.to_dict(),
             "embedding_model_id": self.embedding_model_id,
@@ -151,6 +184,7 @@ class SceneGraph:
             edges=[SceneEdge.from_dict(e) for e in data.get("edges", [])],
             point_cloud_uri=data.get("point_cloud_uri"),
             roi_area_m2=data.get("roi_area_m2"),
+            schema_version=int(data.get("schema_version", 1)),
         )
 
     def to_json(self, path: Path | str) -> None:

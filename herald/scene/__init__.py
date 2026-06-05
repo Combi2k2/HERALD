@@ -1,10 +1,15 @@
-"""Offline scene graph construction from OSM data."""
+"""Scene graph construction and refinement."""
 
-from herald.scene.embedding import Encoder, StubEncoder
-from herald.scene.frame import LocalFrame
-from herald.scene.graph import SceneEvent, SceneGraph, SceneNode
-from herald.scene.init import BuildResult, build_scene_graph
-from herald.scene.roi import ROI
+from herald.scene.common import LocalFrame, ROI, SceneEvent, SceneGraph, SceneNode
+from herald.scene.init import (
+    BuildResult,
+    ContainmentForest,
+    NodeClassification,
+    SITE_OSM_ID,
+    build_scene_graph,
+    graph_node_id,
+)
+from services.embeddings import Encoder, StubEncoder
 
 __all__ = [
     "Encoder",
@@ -15,5 +20,9 @@ __all__ = [
     "SceneNode",
     "StubEncoder",
     "BuildResult",
+    "ContainmentForest",
+    "SITE_OSM_ID",
+    "graph_node_id",
+    "NodeClassification",
     "build_scene_graph",
 ]

@@ -11,7 +11,7 @@ from pyproj import Geod
 from shapely.geometry import Polygon, mapping, shape
 from shapely.ops import transform
 
-from herald.osm.client import OSMFeature
+from services.osm.client import OSMFeature
 
 DEFAULT_MAX_AREA_M2 = 5_000_000.0  # 5 km²
 _GEOD = Geod(ellps="WGS84")
@@ -120,6 +120,11 @@ class ROI:
             if geom.intersects(self.polygon):
                 kept.append(feat)
         return kept
+
+    def bbox(self) -> tuple[float, float, float, float]:
+        """Return south, west, north, east bounds."""
+        minx, miny, maxx, maxy = self.polygon.bounds
+        return (miny, minx, maxy, maxx)
 
     def to_utm_polygon(self) -> tuple[Any, Any]:
         """Project polygon to local UTM for metric operations.

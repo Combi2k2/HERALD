@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from pyproj import Transformer
 
-from herald.osm.client import LatLon
+from services.osm.client import LatLon
 
 
 @dataclass(frozen=True)
