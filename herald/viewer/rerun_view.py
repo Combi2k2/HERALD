@@ -3,62 +3,84 @@
 Local ENU is mapped into Rerun as RIGHT_HAND_Z_UP:
   X = East, Y = North, Z = Up — ground lies in the XY plane at Z=0.
 
-Polygons are drawn as closed LineStrips3D through their stored vertices (no
-retriangulation), matching the Folium / GeoJSON rings exactly.
-
-RUF (X=east, Y=up, Z=north) is left-handed and Rerun mirrors it; do not use it.
+Ground (Z=0): OSM footprint outlines (``osm/raw/*``).
+Upper layers: ancestor contours only, raised by containment depth.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import Any
 
-from herald.osm.client import OSMFeature, OSMRawPolygon
-from herald.scene.frame import LocalFrame
-from herald.scene.graph import SceneEvent, SceneGraph, SceneNode
+from services.osm.client import OSMFeature, OSMRawPolygon
+from herald.scene.common.frame import LocalFrame
+from herald.scene.common.graph import SceneEvent, SceneGraph, SceneNode
+from herald.viewer.hierarchy_layout import (
+    GROUND_Z,
+    LAYER_HEIGHT_M,
+    SITE_ID,
+    ancestor_layer_z_m,
+    children_map_from_pairs,
+    depth_from_site,
+    is_containment_leaf,
+    max_distance_to_leaf,
+)
+from herald.viewer.mesh import layer_z_with_epsilon
+from herald.viewer.style import (
+    CATEGORY_COLORS,
+    COLOR_PATHWAY,
+    color_for_node,
+    metadata_lines,
+)
 
-if TYPE_CHECKING:
-    pass
-
-# Line radii in metres (campus-scale view needs visible width, not cm strokes).
-_RADIUS_CONTOUR = 0.5
-_RADIUS_RAW_POLYGON = 1.0
-_RADIUS_PATHWAY = 1.0
-_GROUND_OFFSET = 0.02
-
-
-def _closed_ring(ring: list[tuple[float, float]]) -> list[tuple[float, float]]:
-    if not ring:
-        return ring
-    if ring[0] == ring[-1]:
-        return list(ring)
-    return [*ring, ring[0]]
-
-
-# RGBA 0–255
-_COLOR_ROI = [255, 255, 255, 180]
-_COLOR_OUTDOOR = [56, 189, 248, 220]
-_COLOR_BUILDING_FOOTPRINT = [59, 130, 246, 255]
-_COLOR_BUILDING_BOX = [37, 99, 235, 120]
-_COLOR_PATHWAY = [234, 88, 12, 255]
-
-# Raw OSM polygon layers (RGBA 0–255), keyed by primary tag
 _RAW_OSM_COLORS: dict[str, list[int]] = {
-    "building": [96, 165, 250, 200],
-    "landuse": [74, 222, 128, 170],
-    "leisure": [192, 132, 252, 170],
-    "amenity": [244, 114, 182, 170],
-    "natural": [52, 211, 153, 170],
-    "water": [34, 211, 238, 190],
-    "waterway": [6, 182, 212, 190],
-    "highway": [251, 146, 60, 170],
-    "place": [250, 204, 21, 150],
-    "man_made": [148, 163, 184, 170],
-    "barrier": [239, 68, 68, 150],
-    "untagged": [250, 250, 250, 120],
-    "other": [156, 163, 175, 140],
+    "building": [96, 165, 250],
+    "building:part": [96, 165, 250],
+    "landuse": [74, 222, 128],
+    "leisure": [192, 132, 252],
+    "amenity": [244, 114, 182],
+    "natural": [52, 211, 153],
+    "water": [34, 211, 238],
+    "waterway": [6, 182, 212],
+    "highway": [251, 146, 60],
+    "place": [250, 204, 21],
+    "man_made": [148, 163, 184],
+    "barrier": [239, 68, 68],
+    "untagged": [161, 161, 170],
+    "other": [161, 161, 170],
 }
-_RAW_DEFAULT_COLOR = [156, 163, 175, 140]
+_RAW_DEFAULT_COLOR = [161, 161, 170]
+
+# Screen-space stroke widths (pixels at 100% UI scale) — not meter tubes.
+_LINE_WIDTH_RAW_PX = 1.0
+_LINE_WIDTH_CONTOUR_PX = 1.5
+_LINE_WIDTH_PATHWAY_PX = 1.25
+
+_DISPLAY_TAG_ORDER = (
+    "building",
+    "building:part",
+    "landuse",
+    "leisure",
+    "amenity",
+    "natural",
+    "water",
+    "waterway",
+    "highway",
+    "place",
+    "man_made",
+    "barrier",
+    "tourism",
+    "sport",
+)
+
+
+def _display_tag(tags: dict[str, str]) -> str:
+    """Semantic OSM tag for coloring — not alphabetical ``primary_tag``."""
+    for key in _DISPLAY_TAG_ORDER:
+        if key in tags:
+            return key
+    if not tags:
+        return "untagged"
+    return "other"
 
 
 def _require_rerun():
@@ -71,8 +93,15 @@ def _require_rerun():
     return rr
 
 
+def _closed_ring(ring: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    if not ring:
+        return ring
+    if ring[0] == ring[-1]:
+        return list(ring)
+    return [*ring, ring[0]]
+
+
 def _enu_to_rr(east: float, north: float, up: float = 0.0) -> list[float]:
-    """Map local East-North-Up metres to Rerun RIGHT_HAND_Z_UP coordinates."""
     return [east, north, up]
 
 
@@ -84,26 +113,117 @@ class RerunSceneViewer:
         *,
         app_id: str = "herald-scene",
         spawn: bool = True,
-        show_building_boxes: bool = False,
     ) -> None:
         rr = _require_rerun()
         rr.init(app_id, spawn=spawn)
-        # RIGHT_HAND_Z_UP: X=East, Y=North, Z=Up — campus map on the XY ground plane.
         rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
         self._rr = rr
         self._frame: LocalFrame | None = None
-        self._show_building_boxes = show_building_boxes
+        self._node_store: dict[str, SceneNode] = {}
+        self._containment_edges: list[tuple[str, str]] = []
+        self._layout_cache: dict[str, int] = {}
+        self._scene_span_m = 500.0
+        self._send_blueprint()
+
+    def _send_blueprint(self) -> None:
+        try:
+            import rerun.blueprint as rrb
+        except (ImportError, ModuleNotFoundError, AttributeError):
+            return
+
+        span = self._scene_span_m
+        eye_dist = max(1200.0, span * 1.6)
+        self._rr.send_blueprint(
+            rrb.Blueprint(
+                rrb.Spatial3DView(
+                    origin="/",
+                    name="HERALD Scene",
+                    eye_controls=rrb.EyeControls3D(
+                        kind=rrb.Eye3DKind.Orbital,
+                        position=(eye_dist, -eye_dist, eye_dist * 0.55),
+                        look_target=(0.0, 0.0, span * 0.15),
+                    ),
+                ),
+                collapse_panels=True,
+            )
+        )
+
+    def _update_scene_span(self, ring: list[tuple[float, float]]) -> None:
+        if self._frame is None or not ring:
+            return
+        for lat, lon in ring:
+            east, north = self._frame.to_local(lat, lon)
+            self._scene_span_m = max(
+                self._scene_span_m, abs(east), abs(north), 1.0
+            )
+
+    def _line_width(self, px: float):
+        return self._rr.Radius.ui_points(px)
+
+    def _ring_to_rr(
+        self, ring: list[tuple[float, float]], *, z: float
+    ) -> list[list[float]]:
+        if self._frame is None:
+            return [[0.0, 0.0, z]]
+        return [
+            _enu_to_rr(*self._frame.to_local(lat, lon), z)
+            for lat, lon in ring
+        ]
+
+    def _log_contour(
+        self,
+        path: str,
+        ring: list[tuple[float, float]],
+        color: list[int],
+        *,
+        z: float,
+        width_px: float = _LINE_WIDTH_CONTOUR_PX,
+        static: bool = True,
+    ) -> None:
+        if self._frame is None:
+            return
+        z = layer_z_with_epsilon(z, path)
+        strip = self._ring_to_rr(_closed_ring(ring), z=z)
+        if len(strip) < 3:
+            return
+        rgba = [*color[:3], 255] if len(color) == 3 else list(color)
+        self._rr.log(
+            path,
+            self._rr.LineStrips3D(
+                [strip],
+                colors=[rgba],
+                radii=[self._line_width(width_px)],
+            ),
+            static=static,
+        )
 
     def set_frame(self, frame: LocalFrame) -> None:
         self._frame = frame
+        self._scene_span_m = 500.0
+        self._send_blueprint()
+        self._rr.log(
+            "pipeline/status",
+            self._rr.TextLog(
+                "Ground map: osm/raw/* outlines. Upper layers: ancestor contours only "
+                f"({LAYER_HEIGHT_M:.0f} m per level). Select entities for attrs."
+            ),
+            static=True,
+        )
 
     def publish(self, event: SceneEvent) -> None:
         if event.kind == "roi_resolved":
             self._log_roi(event)
+        elif event.kind == "pipeline_status":
+            self._log_status(event)
         elif event.kind == "zone_node_created":
             self._log_zone(event)
         elif event.kind == "containment_inferred":
             self._log_containment(event)
+
+    def log_pathways(
+        self, pathways: list[OSMFeature], *, static: bool = True
+    ) -> None:
+        self._log_pathways(pathways, static=static)
 
     def render_graph(
         self,
@@ -113,31 +233,23 @@ class RerunSceneViewer:
     ) -> None:
         """Render a complete saved graph (offline replay)."""
         self.set_frame(graph.frame)
-        site = next((n for n in graph.nodes if n.level == "site"), graph.nodes[0])
-        self._log_contour("site/roi/contour", site.geometry_latlon, _COLOR_ROI)
-
-        for node in graph.nodes:
-            if node.level == "outdoor_region":
-                self._log_contour(
-                    f"site/zones/{node.id}/contour",
-                    node.geometry_latlon,
-                    _COLOR_OUTDOOR,
-                )
-            elif node.level == "building":
-                parent = self._parent_of(graph, node.id) or "unassigned"
-                self._log_building(node, parent)
-
-        if pathways:
-            self._log_pathways(pathways)
+        self._node_store.clear()
+        self._containment_edges.clear()
+        self._layout_cache.clear()
 
         for edge in graph.edges:
-            if edge.edge_type != "contains":
-                continue
-            parent = graph.get_node(edge.source_id)
-            child = graph.get_node(edge.target_id)
-            if parent is None or child is None:
-                continue
-            self._log_edge(parent, child, edge.source_id, edge.target_id)
+            if edge.edge_type == "contains":
+                self._containment_edges.append((edge.source_id, edge.target_id))
+
+        for node in graph.nodes:
+            self._node_store[node.id] = node
+
+        self._refresh_hierarchy_layers(static=True)
+
+        if pathways:
+            self._log_pathways(pathways, static=True)
+
+        self._log_legend(static=True)
 
     def render_raw_osm_polygons(
         self,
@@ -145,23 +257,27 @@ class RerunSceneViewer:
         *,
         static: bool = True,
     ) -> None:
-        """Draw raw OSM polygon rings exactly as stored, grouped by primary tag."""
         if self._frame is None or not polygons:
             return
+        for poly in polygons:
+            self._update_scene_span(list(poly.geometry))
+
         by_tag: dict[str, list[OSMRawPolygon]] = {}
         for poly in polygons:
-            by_tag.setdefault(poly.primary_tag, []).append(poly)
+            tag = _display_tag(dict(poly.tags))
+            by_tag.setdefault(tag, []).append(poly)
 
         for tag, group in sorted(by_tag.items()):
             color = _RAW_OSM_COLORS.get(tag, _RAW_DEFAULT_COLOR)
             strips: list[list[list[float]]] = []
             colors: list[list[int]] = []
             for poly in group:
-                strip = self._ring_to_rr(_closed_ring(list(poly.geometry)))
+                z = layer_z_with_epsilon(GROUND_Z, poly.osm_id)
+                strip = self._ring_to_rr(_closed_ring(list(poly.geometry)), z=z)
                 if len(strip) < 3:
                     continue
                 strips.append(strip)
-                colors.append(color)
+                colors.append([*color[:3], 255])
             if not strips:
                 continue
             self._rr.log(
@@ -169,27 +285,143 @@ class RerunSceneViewer:
                 self._rr.LineStrips3D(
                     strips,
                     colors=colors,
-                    radii=[_RADIUS_RAW_POLYGON],
+                    radii=[self._line_width(_LINE_WIDTH_RAW_PX)],
                 ),
                 static=static,
             )
+        self._send_blueprint()
 
-    def _parent_of(self, graph: SceneGraph, node_id: str) -> str | None:
-        for edge in graph.edges:
-            if edge.target_id == node_id and edge.edge_type == "contains":
-                return edge.source_id
+    def _children_map(self) -> dict[str, list[str]]:
+        return children_map_from_pairs(self._containment_edges)
+
+    def _ancestors_of(self, node_id: str, children_map: dict[str, list[str]]) -> set[str]:
+        ancestors: set[str] = set()
+        parent_id = self._parent_of_node_in(node_id, children_map)
+        while parent_id is not None:
+            ancestors.add(parent_id)
+            parent_id = self._parent_of_node_in(parent_id, children_map)
+        return ancestors
+
+    def _parent_of_node_in(
+        self, node_id: str, children_map: dict[str, list[str]]
+    ) -> str | None:
+        for parent_id, child_ids in children_map.items():
+            if node_id in child_ids:
+                return parent_id
         return None
 
-    def _ring_to_rr(self, ring: list[tuple[float, float]], *, up: float = 0.05) -> list[list[float]]:
-        """Project a lat/lon ring to Rerun; vertices follow the source polygon order."""
-        if self._frame is None:
-            return [[0.0, 0.0, up]]
-        return [
-            _enu_to_rr(*self._frame.to_local(lat, lon), up)
-            for lat, lon in ring
-        ]
+    def _log_node_metadata(
+        self,
+        node: SceneNode,
+        *,
+        base: str,
+        children_map: dict[str, list[str]],
+        static: bool,
+        layer_z: float | None = None,
+    ) -> None:
+        tree_depth = depth_from_site(
+            node.id, children_map, site_id=SITE_ID, cache=self._layout_cache
+        )
+        dist = max_distance_to_leaf(
+            node.id, children_map, cache=self._layout_cache
+        )
+        meta_lines = metadata_lines(node)
+        meta_lines.append(f"tree_depth_from_site: {tree_depth}")
+        meta_lines.append(f"tree_depth_to_leaf: {dist}")
+        if layer_z is not None:
+            meta_lines.append(f"layer_z_m: {layer_z:.1f}")
+        self._rr.log(
+            f"{base}/metadata",
+            self._rr.TextLog("\n".join(meta_lines)),
+            static=static,
+        )
+        extra: dict[str, Any] = {
+            "tree_depth_to_leaf": dist,
+            "tree_depth_from_site": tree_depth,
+        }
+        if layer_z is not None:
+            extra["layer_z_m"] = layer_z
+        self._log_any_values(f"{base}/attrs", node, static=static, **extra)
 
-    def _line_to_rr(self, coords: list[tuple[float, float]], *, up: float = 0.1) -> list[list[float]]:
+    def _render_ancestor_layer(
+        self,
+        node: SceneNode,
+        *,
+        children_map: dict[str, list[str]],
+        static: bool,
+    ) -> None:
+        if self._frame is None or node.level == "site":
+            return
+
+        layer_z = ancestor_layer_z_m(
+            node.id, children_map, site_id=SITE_ID, cache=self._layout_cache
+        )
+        base = f"site/layers/{node.id}"
+        self._update_scene_span(node.geometry_latlon)
+
+        if layer_z is not None:
+            color = color_for_node(node)
+            self._log_contour(
+                f"{base}/footprint",
+                node.geometry_latlon,
+                color,
+                z=layer_z,
+                width_px=_LINE_WIDTH_CONTOUR_PX,
+                static=static,
+            )
+
+        self._log_node_metadata(
+            node,
+            base=base,
+            children_map=children_map,
+            static=static,
+            layer_z=layer_z,
+        )
+
+    def _render_leaf_metadata(
+        self,
+        node: SceneNode,
+        *,
+        children_map: dict[str, list[str]],
+        static: bool,
+    ) -> None:
+        base = f"site/nodes/{node.id}"
+        self._log_node_metadata(
+            node,
+            base=base,
+            children_map=children_map,
+            static=static,
+            layer_z=GROUND_Z,
+        )
+
+    def _render_nodes(
+        self, node_ids: set[str], *, children_map: dict[str, list[str]], static: bool
+    ) -> None:
+        for node_id in sorted(node_ids):
+            node = self._node_store.get(node_id)
+            if node is None:
+                continue
+            if node.level == "site":
+                continue
+            if is_containment_leaf(node_id, children_map):
+                self._render_leaf_metadata(
+                    node, children_map=children_map, static=static
+                )
+            else:
+                self._render_ancestor_layer(
+                    node, children_map=children_map, static=static
+                )
+
+    def _refresh_hierarchy_layers(self, *, static: bool) -> None:
+        if not self._node_store:
+            return
+        children_map = self._children_map()
+        self._layout_cache.clear()
+        self._render_nodes(set(self._node_store), children_map=children_map, static=static)
+
+    def _line_to_rr(
+        self, coords: list[tuple[float, float]], *, up: float = GROUND_Z + 0.05
+    ) -> list[list[float]]:
         if self._frame is None:
             return [[0.0, 0.0, up]]
         return [
@@ -197,82 +429,69 @@ class RerunSceneViewer:
             for lat, lon in coords
         ]
 
-    def _centroid_rr(
-        self, ring: list[tuple[float, float]], *, up: float = 0.0
-    ) -> tuple[float, float, float]:
-        if not ring or self._frame is None:
-            return (0.0, 0.0, up)
-        east = north = 0.0
-        for lat, lon in ring:
-            e, n = self._frame.to_local(lat, lon)
-            east += e
-            north += n
-        n_pts = len(ring)
-        return _enu_to_rr(east / n_pts, north / n_pts, up)
+    def _node_from_event(self, event: SceneEvent) -> SceneNode | None:
+        if not event.node_id:
+            return None
+        payload = event.payload
+        geom = payload.get("geometry_latlon")
+        if not geom:
+            return None
+        ring = [(float(p[0]), float(p[1])) for p in geom]
+        level = payload.get("level", "outdoor_region")
+        zone_kind = None if level == "site" else (
+            "building" if level == "building" else "outdoor_region"
+        )
+        return SceneNode(
+            id=event.node_id,
+            level=level,
+            zone_kind=zone_kind,
+            text=str(payload.get("description", "")),
+            geometry_latlon=ring,
+            height_m=float(payload.get("height_m", 10.0)),
+            height_source=payload.get("height_source", "default"),
+            osm_id=payload.get("osm_id"),
+            role=payload.get("role"),
+            category=payload.get("category"),
+            function=payload.get("function"),
+            name=payload.get("name") or None,
+            confidence=payload.get("confidence"),
+            classification_source=payload.get("classification_source"),
+            osm_tags=payload.get("osm_tags") or None,
+        )
 
-    def _bbox_from_footprint(
-        self, ring: list[tuple[float, float]], height_m: float
-    ) -> tuple[list[list[float]], list[list[float]]]:
-        if self._frame is None or not ring:
-            return ([[0.0, 0.0, 0.0]], [[1.0, 1.0, 1.0]])
-        easts, norths = [], []
-        for lat, lon in ring:
-            e, n = self._frame.to_local(lat, lon)
-            easts.append(e)
-            norths.append(n)
-        min_e, max_e = min(easts), max(easts)
-        min_n, max_n = min(norths), max(norths)
-        cx = (min_e + max_e) / 2
-        cy = (min_n + max_n) / 2
-        sx = max(max_e - min_e, 1.0)
-        sy = max(max_n - min_n, 1.0)
-        centers = [[cx, cy, height_m / 2]]
-        half_sizes = [[sx / 2, sy / 2, height_m / 2]]
-        return centers, half_sizes
-
-    def _log_contour(
-        self,
-        path: str,
-        ring: list[tuple[float, float]],
-        color: list[int],
-        *,
-        static: bool = True,
-        radius: float = _RADIUS_CONTOUR,
+    def _log_any_values(
+        self, path: str, node: SceneNode, *, static: bool, **extra: Any
     ) -> None:
-        strip = self._ring_to_rr(_closed_ring(ring), up=_GROUND_OFFSET + 0.03)
-        if len(strip) < 3:
-            return
-        self._rr.log(
-            path,
-            self._rr.LineStrips3D(
-                [strip],
-                colors=[color],
-                radii=[radius],
-            ),
-            static=static,
-        )
+        values: dict[str, Any] = {
+            "id": node.id,
+            "level": node.level,
+            "role": node.role or "",
+            "category": node.category or "",
+            "function": node.function or "",
+            "confidence": node.confidence if node.confidence is not None else 0.0,
+            "source": node.classification_source or "",
+            **extra,
+        }
+        if node.osm_id is not None:
+            values["osm_id"] = node.osm_id
+        if node.name:
+            values["name"] = node.name
+        if node.text:
+            values["description"] = node.text
+        self._rr.log(path, self._rr.AnyValues(**values), static=static)
 
-    def _log_building(self, node: SceneNode, parent_seg: str, *, static: bool = True) -> None:
-        base = f"site/zones/{parent_seg}/buildings/{node.id}"
-        self._log_contour(
-            f"{base}/footprint",
-            node.geometry_latlon,
-            _COLOR_BUILDING_FOOTPRINT,
-            static=static,
-            radius=_RADIUS_CONTOUR,
-        )
-        if not self._show_building_boxes:
-            return
-        centers, half_sizes = self._bbox_from_footprint(
-            node.geometry_latlon, node.height_m
-        )
+    def _log_legend(self, *, static: bool = True) -> None:
+        lines = [
+            "Ground (Z=0): OSM outline map under osm/raw/*.",
+            f"Upper layers: ancestor contours only, +{LAYER_HEIGHT_M:.0f} m per tree level.",
+            "Select site/nodes/*/attrs or site/layers/*/attrs to inspect.",
+            "",
+        ]
+        for category, rgba in sorted(CATEGORY_COLORS.items()):
+            lines.append(f"  {category}: rgb({rgba[0]}, {rgba[1]}, {rgba[2]})")
         self._rr.log(
-            f"{base}/box",
-            self._rr.Boxes3D(
-                centers=centers,
-                half_sizes=half_sizes,
-                colors=[_COLOR_BUILDING_BOX],
-            ),
+            "legend/categories",
+            self._rr.TextLog("\n".join(lines)),
             static=static,
         )
 
@@ -287,75 +506,54 @@ class RerunSceneViewer:
         if not strips:
             return
         self._rr.log(
-            "site/pathways",
+            "osm/pathways",
             self._rr.LineStrips3D(
                 strips,
-                colors=[_COLOR_PATHWAY],
-                radii=[_RADIUS_PATHWAY],
+                colors=[[*COLOR_PATHWAY[:3], 255]],
+                radii=[self._line_width(_LINE_WIDTH_PATHWAY_PX)],
             ),
             static=static,
         )
 
     def _log_roi(self, event: SceneEvent) -> None:
-        verts = event.payload.get("vertices", [])
         if self._frame is None and "centroid" in event.payload:
-            from herald.osm.client import LatLon
+            from services.osm.client import LatLon
 
             c = event.payload["centroid"]
             self._frame = LocalFrame(origin=LatLon(lat=c["lat"], lon=c["lon"]))
-        self._log_contour("site/roi/contour", verts, _COLOR_ROI, static=False)
+        verts = event.payload.get("vertices", [])
+        if verts:
+            self._update_scene_span(verts)
+        self._send_blueprint()
+        self._log_legend(static=True)
+
+    def _log_status(self, event: SceneEvent) -> None:
+        message = event.payload.get("message", "")
+        if not message:
+            return
+        self._rr.log(
+            "pipeline/status",
+            self._rr.TextLog(message),
+            static=True,
+        )
 
     def _log_zone(self, event: SceneEvent) -> None:
-        level = event.payload.get("level")
-        geom = event.payload.get("geometry_latlon")
-        if not geom or not event.node_id:
+        node = self._node_from_event(event)
+        if node is None:
             return
-        ring = [(float(p[0]), float(p[1])) for p in geom]
-        if level == "outdoor_region":
-            self._log_contour(
-                f"site/zones/{event.node_id}/contour",
-                ring,
-                _COLOR_OUTDOOR,
-                static=False,
-            )
-        elif level == "building":
-            parent = event.parent_id or "unassigned"
-            height_m = float(event.payload.get("height_m", 10.0))
-            node = SceneNode(
-                id=event.node_id,
-                level="building",
-                zone_kind="building",
-                text="",
-                geometry_latlon=ring,
-                height_m=height_m,
-            )
-            self._log_building(node, parent, static=False)
+        self._node_store[node.id] = node
 
     def _log_containment(self, event: SceneEvent) -> None:
         if event.parent_id is None or event.node_id is None:
             return
-        # Edges drawn in bulk during render_graph; skip per-event text spam.
-
-    def _log_edge(
-        self,
-        parent: SceneNode,
-        child: SceneNode,
-        parent_id: str,
-        child_id: str,
-    ) -> None:
-        if self._frame is None:
-            return
-        p = self._centroid_rr(parent.geometry_latlon, up=0.5)
-        if child.level == "building":
-            c = self._centroid_rr(child.geometry_latlon, up=child.height_m / 2)
-        else:
-            c = self._centroid_rr(child.geometry_latlon, up=0.5)
-        vectors = [[c[0] - p[0], c[1] - p[1], c[2] - p[2]]]
-        self._rr.log(
-            f"graph/edges/{parent_id}-{child_id}",
-            self._rr.Arrows3D(origins=[list(p)], vectors=vectors),
-            static=True,
-        )
+        edge = (event.parent_id, event.node_id)
+        if edge not in self._containment_edges:
+            self._containment_edges.append(edge)
+        self._layout_cache.clear()
+        children_map = self._children_map()
+        affected = {event.parent_id, event.node_id}
+        affected |= self._ancestors_of(event.parent_id, children_map)
+        self._render_nodes(affected, children_map=children_map, static=True)
 
 
 def publish_event(viewer: RerunSceneViewer, event: SceneEvent) -> None:
