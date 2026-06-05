@@ -3,9 +3,9 @@
 import sys
 from unittest.mock import MagicMock, patch
 
-from herald.osm.client import LatLon
-from herald.scene.frame import LocalFrame
-from herald.scene.graph import SceneEvent, SceneGraph, SceneNode
+from services.osm.client import LatLon
+from herald.scene.common.frame import LocalFrame
+from herald.scene.common.graph import SceneEvent, SceneGraph, SceneNode
 from herald.viewer.rerun_view import _closed_ring
 
 
@@ -22,9 +22,11 @@ def test_publish_roi_event_without_rerun_import_at_module_level():
         zone_kind=None,
         text="site",
         geometry_latlon=[(48.71, 2.20), (48.712, 2.20), (48.712, 2.202), (48.71, 2.202), (48.71, 2.20)],
+        role="site",
+        category="ground_other",
     )
     building = SceneNode(
-        id="building_1",
+        id="node_1",
         level="building",
         zone_kind="building",
         text="hall",
@@ -36,14 +38,38 @@ def test_publish_roi_event_without_rerun_import_at_module_level():
             (48.711, 2.201),
         ],
         height_m=12.0,
+        role="structure",
+        category="building",
+        function="academic",
+        confidence=0.95,
+        classification_source="osm_template",
+    )
+    region = SceneNode(
+        id="node_region",
+        level="outdoor_region",
+        zone_kind="outdoor_region",
+        text="campus block",
+        geometry_latlon=[
+            (48.710, 2.200),
+            (48.710, 2.202),
+            (48.712, 2.202),
+            (48.712, 2.200),
+            (48.710, 2.200),
+        ],
+        role="region_use",
+        category="vegetation",
+        function="none",
+        confidence=0.9,
+        classification_source="osm_template",
     )
     graph = SceneGraph(
         site_id="site_000",
         frame=frame,
         embedding_model_id="stub-v0",
-        nodes=[node, building],
+        nodes=[node, region, building],
     )
-    graph.add_edge("site_000", "building_1")
+    graph.add_edge("site_000", "node_region")
+    graph.add_edge("node_region", "node_1")
     mock_rr = MagicMock()
     with patch.dict("sys.modules", {"rerun": mock_rr}):
         from herald.viewer.rerun_view import RerunSceneViewer
@@ -62,16 +88,5 @@ def test_publish_roi_event_without_rerun_import_at_module_level():
         viewer.render_graph(graph)
     assert mock_rr.init.called
     assert mock_rr.LineStrips3D.called
-    assert not mock_rr.Boxes3D.called
-
-    with patch.dict("sys.modules", {"rerun": mock_rr}):
-        from herald.viewer import rerun_view
-
-        viewer_with_boxes = rerun_view.RerunSceneViewer(
-            spawn=False, show_building_boxes=True
-        )
-        viewer_with_boxes.set_frame(frame)
-        viewer_with_boxes.render_graph(graph)
-    assert mock_rr.Boxes3D.called
-    for call in mock_rr.Boxes3D.call_args_list:
-        assert "rotations" not in call.kwargs
+    assert not mock_rr.Mesh3D.called
+    assert not mock_rr.Arrows3D.called

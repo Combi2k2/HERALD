@@ -1,9 +1,9 @@
 """Tests for Folium map overlay builder."""
 
-from herald.osm.client import LatLon
-from herald.scene.frame import LocalFrame
-from herald.scene.graph import SceneGraph, SceneNode
-from herald.scene.roi import ROI
+from services.osm.client import LatLon
+from herald.scene.common.frame import LocalFrame
+from herald.scene.common.graph import SceneGraph, SceneNode
+from herald.scene.common.roi import ROI
 from herald.ui.map_overlay import _write_overlay_map_html
 
 

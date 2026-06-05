@@ -1,6 +1,6 @@
 """Tests for ROI polygon helpers."""
 
-from herald.scene.roi import ROI
+from herald.scene.common.roi import ROI
 
 
 def test_from_bbox_area_reasonable():
@@ -18,7 +18,7 @@ def test_latlon_vertices_round_trip():
 
 
 def test_clip_features_drops_outside():
-    from herald.osm.client import OSMFeature
+    from services.osm.client import OSMFeature
 
     roi = ROI.from_bbox(48.71, 2.20, 48.712, 2.202)
     inside = OSMFeature(

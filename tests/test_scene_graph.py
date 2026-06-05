@@ -2,10 +2,10 @@
 
 import numpy as np
 
-from herald.osm.client import LatLon
-from herald.scene.embedding import StubEncoder
-from herald.scene.frame import LocalFrame
-from herald.scene.graph import SceneEdge, SceneGraph, SceneNode
+from services.osm.client import LatLon
+from services.embeddings.encoder import StubEncoder
+from herald.scene.common.frame import LocalFrame
+from herald.scene.common.graph import SceneEdge, SceneGraph, SceneNode
 
 
 def _sample_graph() -> SceneGraph:
