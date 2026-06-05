@@ -1,9 +1,12 @@
 """Unit tests for OSM Overpass client (mocked HTTP)."""
 
-from herald.osm.client import (
+import requests
+
+from services.osm.client import (
     OSMClient,
     _build_overpass_polygon_query,
     _infer_geometry_kind,
+    _is_retryable_http_error,
     _parse_raw_polygon,
     _ring_is_closed,
 )
@@ -98,7 +101,11 @@ def test_parse_raw_polygon_landuse():
 
 def test_query_raw_polygons_deduplicates():
     payload = {
-        "elements": [SAMPLE_OVERPASS_RESPONSE["elements"][0], SAMPLE_LANDUSE_POLYGON]
+        "elements": [
+            SAMPLE_OVERPASS_RESPONSE["elements"][0],
+            SAMPLE_LANDUSE_POLYGON,
+            SAMPLE_OVERPASS_RESPONSE["elements"][1],
+        ]
     }
 
     class _RawMockSession:
@@ -123,11 +130,13 @@ def test_query_raw_polygons_deduplicates():
     tags = {p.primary_tag for p in result.polygons}
     assert "building" in tags
     assert "landuse" in tags
+    assert len(result.highways) == 1
+    assert result.highways[0].tags["highway"] == "footway"
 
 
 def test_build_overpass_raw_polygons_query_has_no_tag_filter():
     verts = [(48.71, 2.20), (48.71, 2.21), (48.72, 2.21), (48.72, 2.20)]
-    from herald.osm.client import _build_overpass_raw_polygons_query
+    from services.osm.client import _build_overpass_raw_polygons_query
 
     query = _build_overpass_raw_polygons_query(verts)
     assert 'way(poly:"' in query
@@ -150,6 +159,72 @@ def test_query_in_polygon_posts_poly_query():
     assert _MockSession.last_query is not None
     assert "poly:" in _MockSession.last_query
     assert len(result.buildings) == 1
+
+
+def test_is_retryable_http_error():
+    resp = requests.Response()
+    resp.status_code = 504
+    assert _is_retryable_http_error(requests.HTTPError(response=resp)) is True
+    resp.status_code = 404
+    assert _is_retryable_http_error(requests.HTTPError(response=resp)) is False
+    assert _is_retryable_http_error(requests.Timeout()) is True
+    assert _is_retryable_http_error(requests.ConnectionError()) is True
+
+
+def test_post_overpass_retries_504_then_succeeds(monkeypatch):
+    calls: list[int] = []
+
+    class _FlakySession:
+        @property
+        def headers(self):
+            return {}
+
+        def post(self, *args, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                resp = requests.Response()
+                resp.status_code = 504
+                raise requests.HTTPError(response=resp)
+            return _MockResponse()
+
+    sleeps: list[float] = []
+    monkeypatch.setattr("services.osm.client.time.sleep", lambda s: sleeps.append(s))
+
+    client = OSMClient(
+        overpass_urls=("https://example.test/interpreter",),
+        session=_FlakySession(),
+    )
+    payload = client._post_overpass("[out:json];node(1);out;")
+    assert payload == SAMPLE_OVERPASS_RESPONSE
+    assert len(calls) == 2
+    assert sleeps == [2.0]
+
+
+def test_post_overpass_raises_after_all_retries(monkeypatch):
+    class _Always504Session:
+        @property
+        def headers(self):
+            return {}
+
+        def post(self, *args, **kwargs):
+            resp = requests.Response()
+            resp.status_code = 504
+            raise requests.HTTPError(response=resp)
+
+    monkeypatch.setattr("services.osm.client.time.sleep", lambda _s: None)
+
+    client = OSMClient(
+        overpass_urls=("https://a.test/interpreter", "https://b.test/interpreter"),
+        session=_Always504Session(),
+    )
+    try:
+        client._post_overpass("[out:json];node(1);out;")
+    except RuntimeError as exc:
+        assert "All Overpass endpoints failed after retries" in str(exc)
+        assert "https://a.test/interpreter" in str(exc)
+        assert "https://b.test/interpreter" in str(exc)
+    else:
+        raise AssertionError("expected RuntimeError")
 
 
 def test_area_highway_treated_as_polygon():

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import math
+import time
 from dataclasses import dataclass, field
 from typing import Any, Literal, Sequence
 import requests
@@ -17,10 +18,16 @@ OSMPrimaryTag = str  # display grouping key, e.g. "building", "shop", "untagged"
 
 DEFAULT_OVERPASS_URLS = (
     "https://overpass.kumi.systems/api/interpreter",
+    "https://lz4.overpass-api.de/api/interpreter",
     "https://overpass-api.de/api/interpreter",
 )
 DEFAULT_RADIUS_M = 200.0
-DEFAULT_TIMEOUT_S = 30
+DEFAULT_TIMEOUT_S = 30.0
+DEFAULT_RAW_POLYGON_TIMEOUT_S = 180.0
+RAW_POLYGON_OVERPASS_TIMEOUT_S = 180
+MAX_RETRIES_PER_URL = 3
+RETRY_BACKOFF_S = (2.0, 5.0, 10.0)
+RETRYABLE_HTTP_STATUS = frozenset({429, 502, 503, 504})
 MAX_POLYGON_VERTICES = 500
 
 
@@ -130,10 +137,11 @@ class OSMRawPolygon:
 
 @dataclass
 class OSMRawPolygonResult:
-    """All polygon geometries returned from a broad Overpass scan."""
+    """Polygon geometries plus line highways from a broad Overpass scan."""
 
     center: LatLon
     polygons: list[OSMRawPolygon] = field(default_factory=list)
+    highways: list[OSMFeature] = field(default_factory=list)
 
     def counts_by_tag(self) -> dict[str, int]:
         counts: dict[str, int] = {}
@@ -203,7 +211,7 @@ def _build_overpass_raw_polygons_query(vertices_latlon: Sequence[tuple[float, fl
     """
     poly_coords = _poly_coords_from_vertices(vertices_latlon)
     return f"""
-[out:json][timeout:90];
+[out:json][timeout:180];
 (
   way(poly:"{poly_coords}");
   relation(poly:"{poly_coords}");
@@ -318,6 +326,16 @@ def _parse_raw_polygon(element: dict[str, Any]) -> OSMRawPolygon | None:
     )
 
 
+def _is_retryable_http_error(exc: BaseException) -> bool:
+    if isinstance(exc, requests.HTTPError) and exc.response is not None:
+        return exc.response.status_code in RETRYABLE_HTTP_STATUS
+    if isinstance(exc, requests.Timeout):
+        return True
+    if isinstance(exc, requests.ConnectionError):
+        return True
+    return False
+
+
 class OSMClient:
     """Client for Overpass API queries around a point."""
 
@@ -337,6 +355,39 @@ class OSMClient:
             }
         )
 
+    def _post_overpass(
+        self,
+        query: str,
+        *,
+        timeout_s: float | None = None,
+    ) -> dict[str, Any]:
+        """POST Overpass QL with per-endpoint retries on transient failures."""
+        read_timeout = timeout_s if timeout_s is not None else self.timeout_s
+        last_error: Exception | None = None
+        for url in self.overpass_urls:
+            for attempt in range(MAX_RETRIES_PER_URL):
+                try:
+                    response = self._session.post(
+                        url,
+                        data=query.encode("utf-8"),
+                        headers={"Content-Type": "text/plain; charset=utf-8"},
+                        timeout=read_timeout,
+                    )
+                    response.raise_for_status()
+                    return response.json()
+                except (requests.RequestException, ValueError) as exc:
+                    last_error = exc
+                    if attempt + 1 < MAX_RETRIES_PER_URL and _is_retryable_http_error(
+                        exc
+                    ):
+                        time.sleep(RETRY_BACKOFF_S[min(attempt, len(RETRY_BACKOFF_S) - 1)])
+                        continue
+                    break
+        raise RuntimeError(
+            f"All Overpass endpoints failed after retries "
+            f"({', '.join(self.overpass_urls)})"
+        ) from last_error
+
     def query_nearby(
         self,
         lat: float,
@@ -346,24 +397,8 @@ class OSMClient:
     ) -> OSMQueryResult:
         """Fetch building and highway geometries within ``radius_m`` of (lat, lon)."""
         query = _build_overpass_query(lat, lon, radius_m)
-        last_error: Exception | None = None
-        for url in self.overpass_urls:
-            try:
-                response = self._session.post(
-                    url,
-                    data=query.encode("utf-8"),
-                    headers={"Content-Type": "text/plain; charset=utf-8"},
-                    timeout=self.timeout_s,
-                )
-                response.raise_for_status()
-                payload = response.json()
-                return self._parse_response(lat, lon, radius_m, payload)
-            except (requests.RequestException, ValueError) as exc:
-                last_error = exc
-                continue
-        raise RuntimeError(
-            f"All Overpass endpoints failed ({', '.join(self.overpass_urls)})"
-        ) from last_error
+        payload = self._post_overpass(query)
+        return self._parse_response(lat, lon, radius_m, payload)
 
     def query_in_polygon(
         self,
@@ -379,27 +414,11 @@ class OSMClient:
         if verts[0] != verts[-1]:
             verts = verts + [verts[0]]
         query = _build_overpass_polygon_query(verts)
-        last_error: Exception | None = None
-        for url in self.overpass_urls:
-            try:
-                response = self._session.post(
-                    url,
-                    data=query.encode("utf-8"),
-                    headers={"Content-Type": "text/plain; charset=utf-8"},
-                    timeout=self.timeout_s,
-                )
-                response.raise_for_status()
-                payload = response.json()
-                ring = verts[:-1] if verts[0] == verts[-1] else verts
-                lat_c = sum(v[0] for v in ring) / len(ring)
-                lon_c = sum(v[1] for v in ring) / len(ring)
-                return self._parse_response(lat_c, lon_c, 0.0, payload)
-            except (requests.RequestException, ValueError) as exc:
-                last_error = exc
-                continue
-        raise RuntimeError(
-            f"All Overpass endpoints failed ({', '.join(self.overpass_urls)})"
-        ) from last_error
+        payload = self._post_overpass(query)
+        ring = verts[:-1] if verts[0] == verts[-1] else verts
+        lat_c = sum(v[0] for v in ring) / len(ring)
+        lon_c = sum(v[1] for v in ring) / len(ring)
+        return self._parse_response(lat_c, lon_c, 0.0, payload)
 
     def query_raw_polygons_in_polygon(
         self,
@@ -410,27 +429,14 @@ class OSMClient:
         if verts[0] != verts[-1]:
             verts = verts + [verts[0]]
         query = _build_overpass_raw_polygons_query(verts)
-        last_error: Exception | None = None
-        for url in self.overpass_urls:
-            try:
-                response = self._session.post(
-                    url,
-                    data=query.encode("utf-8"),
-                    headers={"Content-Type": "text/plain; charset=utf-8"},
-                    timeout=max(self.timeout_s, 90.0),
-                )
-                response.raise_for_status()
-                payload = response.json()
-                ring = verts[:-1] if verts[0] == verts[-1] else verts
-                lat_c = sum(v[0] for v in ring) / len(ring)
-                lon_c = sum(v[1] for v in ring) / len(ring)
-                return self._parse_raw_polygon_response(lat_c, lon_c, payload)
-            except (requests.RequestException, ValueError) as exc:
-                last_error = exc
-                continue
-        raise RuntimeError(
-            f"All Overpass endpoints failed ({', '.join(self.overpass_urls)})"
-        ) from last_error
+        payload = self._post_overpass(
+            query,
+            timeout_s=max(self.timeout_s, DEFAULT_RAW_POLYGON_TIMEOUT_S),
+        )
+        ring = verts[:-1] if verts[0] == verts[-1] else verts
+        lat_c = sum(v[0] for v in ring) / len(ring)
+        lon_c = sum(v[1] for v in ring) / len(ring)
+        return self._parse_raw_polygon_response(lat_c, lon_c, payload)
 
     def _parse_raw_polygon_response(
         self,
@@ -449,10 +455,15 @@ class OSMClient:
             if key in seen:
                 continue
             feature = _parse_raw_polygon(element)
-            if feature is None:
+            if feature is not None:
+                seen.add(key)
+                result.polygons.append(feature)
                 continue
-            seen.add(key)
-            result.polygons.append(feature)
+            if _categorize_element(element) == "highway":
+                highway = _parse_element(element, "highway")
+                if highway is not None and highway.kind == "linestring":
+                    seen.add(key)
+                    result.highways.append(highway)
         return result
 
     def _parse_response(

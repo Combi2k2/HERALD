@@ -1,12 +1,12 @@
 """OpenStreetMap queries via the Overpass API."""
 
-from herald.osm.client import (
+from services.osm.client import (
     OSMClient,
     OSMFeature,
     OSMQueryResult,
     query_nearby,
 )
-from herald.osm.location import LocationConfig, lat_lon_from_env, resolve_location
+from services.osm.location import LocationConfig, lat_lon_from_env, resolve_location
 
 __all__ = [
     "OSMClient",
