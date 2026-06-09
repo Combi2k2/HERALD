@@ -17,12 +17,15 @@ class LocalFrame:
 
     def __post_init__(self) -> None:
         aeqd = (
-            "+proj=aeqd +lat_0={lat} +lon_0={lon} +ellps=WGS84 +units=m +no_defs"
-        ).format(lat=self.origin.lat, lon=self.origin.lon)
+            "+proj=aeqd"
+            f" +lat_0={self.origin.lat}"
+            f" +lon_0={self.origin.lon}"
+            " +ellps=WGS84 +units=m +no_defs"
+        )
         to_local = Transformer.from_crs("EPSG:4326", aeqd, always_xy=True)
-        to_wgs = Transformer.from_crs(aeqd, "EPSG:4326", always_xy=True)
+        to_wgs84 = Transformer.from_crs(aeqd, "EPSG:4326", always_xy=True)
         object.__setattr__(self, "_to_local", to_local)
-        object.__setattr__(self, "_to_wgs", to_wgs)
+        object.__setattr__(self, "_to_wgs84", to_wgs84)
 
     def to_local(self, lat: float, lon: float) -> tuple[float, float]:
         """Convert WGS84 (lat, lon) to local ENU (east, north) meters."""
@@ -31,7 +34,7 @@ class LocalFrame:
 
     def to_wgs84(self, east: float, north: float) -> tuple[float, float]:
         """Convert local ENU (east, north) to WGS84 (lat, lon)."""
-        lon, lat = self._to_wgs.transform(east, north)
+        lon, lat = self._to_wgs84.transform(east, north)
         return (lat, lon)
 
     def ring_to_local(

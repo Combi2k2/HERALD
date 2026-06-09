@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
 from typing import TypeVar
+from tqdm import tqdm
 
 T = TypeVar("T")
 
@@ -21,12 +22,11 @@ def iter_progress(
     if disable:
         yield from iterable
         return
-    from tqdm import tqdm
 
     yield from tqdm(iterable, desc=desc, total=total, unit=unit, leave=leave)
 
 
-def progress_task(
+def task_progress(
     desc: str,
     *,
     total: int,
@@ -36,7 +36,6 @@ def progress_task(
     """Context manager for manual progress updates."""
     if disable:
         return _NullProgress()
-    from tqdm import tqdm
 
     return tqdm(total=total, desc=desc, unit=unit)
 
