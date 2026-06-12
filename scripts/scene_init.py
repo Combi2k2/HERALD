@@ -11,6 +11,7 @@ from pathlib import Path
 
 from herald.browser import suppress_gtk_atk_bridge_warning, open_browser as launch_browser
 from herald.data import RunPaths
+from herald.data.paths import FRAME_JSON
 from services.osm.client import OSMClient
 from services.osm.location import resolve_location
 from services.aerial.fetch import fetch_aerial_for_bbox, save_aerial
@@ -20,8 +21,9 @@ from herald.scene.init import (
     BuildResult,
     build_scene_graph,
     pathways_to_geojson,
-    save_classifications,
+    save_annotations,
 )
+from herald.scene.common.geometry import Frame
 from herald.scene.common.roi import ROI
 from herald.ui import SceneOverlayServer
 from herald.ui.map_overlay import _write_overlay_map_html
@@ -53,27 +55,26 @@ def save_phase1_artifacts(
     osm_polygon_total: int | None = None,
 ) -> None:
     graph = build.graph
+    site = graph.site_node()
     paths.phase1.mkdir(parents=True, exist_ok=True)
     graph.to_json(paths.scene_graph)
     paths.pathways.write_text(json.dumps(pathways_geojson, indent=2), encoding="utf-8")
-    save_classifications(paths.annotations, build.classifications)
-    outdoor = sum(1 for n in graph.nodes if n.level == "outdoor_region")
-    buildings = sum(1 for n in graph.nodes if n.level == "building")
+    save_annotations(paths.annotations, graph)
+    outdoor = sum(1 for n in graph.nodes if n.type == "region")
+    buildings = sum(1 for n in graph.nodes if n.type == "structure")
     meta = {
         "run_id": paths.run_id,
-        "schema_version": graph.schema_version,
-        "site_id": graph.site_id,
-        "embedding_model_id": graph.embedding_model_id,
-        "roi_area_m2": roi.area_m2(),
+        "site_node_id": site.id if site else None,
+        "emb_model_id": graph.emb_model_id,
+        "vlm_model_id": graph.vlm_model_id,
         "raw_dir": str(paths.raw),
         "counts": {
             "nodes": len(graph.nodes),
             "edges": len(graph.edges),
             "outdoor_zones": outdoor,
             "buildings": buildings,
-            "hierarchy_nodes": len(build.forest.nodes),
-            "site_children": len(build.forest.site_children),
-            "other_polygons": len(build.forest.others),
+            "hierarchy_nodes": len(graph.nodes),
+            "site_children": sum(1 for n in graph.nodes if n.pid == site.id) if site else 0,
         },
         "elapsed_s": round(elapsed_s, 2),
     }
@@ -110,7 +111,14 @@ def resolve_roi(
         parts = [float(x) for x in args.bbox.split(",")]
         if len(parts) != 4:
             raise ROIPickerError("--bbox requires south,west,north,east")
-        return ROI.from_bbox(*parts), False
+        return ROI.from_polygon(
+            [
+                (parts[0], parts[1]),
+                (parts[0], parts[3]),
+                (parts[2], parts[3]),
+                (parts[2], parts[1]),
+            ]
+        ), False
     if overlay_server is None:
         raise ROIPickerError(
             "ROI picker requires the scene UI server; omit --no-map or pass --roi / --bbox."
@@ -219,7 +227,6 @@ def main() -> None:
     viewer = None
     on_event = None
     if args.rerun:
-        from services.osm.client import LatLon
         from herald.viewer.rerun_view import RerunSceneViewer
 
         viewer = RerunSceneViewer(spawn=True)
@@ -240,7 +247,14 @@ def main() -> None:
         overlay_server.shutdown()
         overlay_server = None
 
-    print(f"ROI area: {roi.area_m2() / 1e6:.3f} km²")
+    print(f"ROI area: {roi.area() / 1e6:.3f} km²")
+
+    frame = Frame.load(FRAME_JSON)
+    if frame is None:
+        lat, lon = roi.latlon_centroid()
+        frame = Frame.from_origin(lat, lon)
+        frame.save(FRAME_JSON)
+    print(f"Site ENU frame origin: ({frame.lat:.5f}, {frame.lon:.5f})")
 
     if overlay_server is not None:
         overlay_server.set_status("Fetching OSM polygons…")
@@ -253,10 +267,7 @@ def main() -> None:
     print(f"  OSM polygons: {len(raw_polygons.polygons)} ({raw_counts})")
 
     if viewer is not None:
-        lat_c, lon_c = roi.centroid_latlon()
-        from herald.scene.common.frame import LocalFrame
-
-        viewer.set_frame(LocalFrame(origin=LatLon(lat=lat_c, lon=lon_c)))
+        viewer.set_frame(frame)
         viewer.render_raw_osm_polygons(raw_polygons.polygons)
 
     if overlay_server is not None:
@@ -291,14 +302,15 @@ def main() -> None:
         flush=True,
     )
 
-    def checkpoint(partial_graph: SceneGraph, classifications: dict) -> None:
+    def checkpoint(partial_graph: SceneGraph) -> None:
         partial_graph.to_json(paths.scene_graph)
-        save_classifications(paths.annotations, classifications)
+        save_annotations(paths.annotations, partial_graph)
 
     t0 = time.monotonic()
     build = build_scene_graph(
         roi,
         raw_polygons.polygons,
+        frame=frame,
         client=client,
         highways=raw_polygons.highways,
         encoder=encoder,
@@ -341,6 +353,7 @@ def main() -> None:
         _write_overlay_map_html(
             paths.map_overlay,
             roi=roi,
+            frame=frame,
             osm_polygons_geojson=osm_polygons_geojson,
             graph=graph,
             pathways_geojson=pathways_geojson,
@@ -349,6 +362,7 @@ def main() -> None:
         if overlay_server is not None:
             overlay_server.set_overlay_from_scene(
                 roi=roi,
+                frame=frame,
                 osm_polygons_geojson=osm_polygons_geojson,
                 graph=graph,
                 pathways_geojson=pathways_geojson,

@@ -1,8 +1,8 @@
 """Tests for hierarchy-based Rerun layout."""
 
 from herald.viewer.hierarchy_layout import (
-    LAYER_HEIGHT_M,
-    ancestor_layer_z_m,
+    LAYER_HEIGHT,
+    ancestor_layer_z,
     children_map_from_pairs,
     depth_from_site,
     is_containment_leaf,
@@ -18,9 +18,9 @@ def test_depth_from_site_chain():
 
 def test_ancestor_layer_z_only_for_parents():
     children = children_map_from_pairs([("site_000", "region"), ("region", "leaf")])
-    assert ancestor_layer_z_m("site_000", children) is None
-    assert ancestor_layer_z_m("leaf", children) is None
-    assert ancestor_layer_z_m("region", children) == LAYER_HEIGHT_M
+    assert ancestor_layer_z("site_000", children) is None
+    assert ancestor_layer_z("leaf", children) is None
+    assert ancestor_layer_z("region", children) == LAYER_HEIGHT
 
 
 def test_is_containment_leaf():

@@ -1,14 +1,18 @@
 """Tests for Folium map overlay builder."""
 
-from services.osm.client import LatLon
-from herald.scene.common.frame import LocalFrame
+import numpy as np
+
+from herald.scene.common.geometry import Frame
+from herald.scene.common.geometry import Geometry
 from herald.scene.common.graph import SceneGraph, SceneNode
 from herald.scene.common.roi import ROI
 from herald.ui.map_overlay import _write_overlay_map_html
 
 
 def test_write_overlay_map_html_writes_file(tmp_path):
-    roi = ROI.from_bbox(48.710, 2.200, 48.713, 2.203)
+    roi = ROI.from_polygon(
+        [(48.710, 2.200), (48.710, 2.203), (48.713, 2.203), (48.713, 2.200)]
+    )
     osm_geojson = {
         "type": "FeatureCollection",
         "features": [
@@ -36,23 +40,27 @@ def test_write_overlay_map_html_writes_file(tmp_path):
             }
         ],
     }
+    frame = Frame.from_origin(48.7115, 2.2015)
+    ring = [
+        (48.7105, 2.2005),
+        (48.7105, 2.2015),
+        (48.7115, 2.2015),
+        (48.7115, 2.2005),
+        (48.7105, 2.2005),
+    ]
+    coords = np.array(
+        [[*frame.wgs2enu(lat, lon), 0.0] for lat, lon in ring],
+        dtype=np.float64,
+    )
     graph = SceneGraph(
-        site_id="site_000",
-        frame=LocalFrame(origin=LatLon(lat=48.7115, lon=2.2015)),
-        embedding_model_id="stub-v0",
+        emb_model_id="stub-v0",
         nodes=[
             SceneNode(
-                id="outdoor_000",
-                level="outdoor_region",
-                zone_kind="outdoor_region",
-                text="quad",
-                geometry_latlon=[
-                    (48.7105, 2.2005),
-                    (48.7105, 2.2015),
-                    (48.7115, 2.2015),
-                    (48.7115, 2.2005),
-                    (48.7105, 2.2005),
-                ],
+                id="region-uuid",
+                type="region",
+                pid="site-uuid",
+                geom=Geometry(type="polygon", coords=coords, frame="ENU"),
+                desc="quad",
             )
         ],
     )
@@ -60,6 +68,7 @@ def test_write_overlay_map_html_writes_file(tmp_path):
     _write_overlay_map_html(
         out_html,
         roi=roi,
+        frame=frame,
         osm_polygons_geojson=osm_geojson,
         graph=graph,
         pathways_geojson={"type": "FeatureCollection", "features": []},

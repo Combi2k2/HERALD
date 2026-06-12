@@ -22,6 +22,10 @@ SCENE_GRAPH_JSON = "scene_graph.json"
 PATHWAYS_GEOJSON = "pathways.geojson"
 ANNOTATIONS_JSON = "annotations.json"
 METADATA_JSON = "metadata.json"
+FRAME_JSON_NAME = "frame.json"
+
+SITE_DATA_ROOT = Path("data")
+FRAME_JSON = SITE_DATA_ROOT / FRAME_JSON_NAME
 
 
 @dataclass(frozen=True)

@@ -11,9 +11,7 @@ from services.aerial.fetch import (
     _tile_xy_to_latlon,
     crop_polygon_views,
     highlight_polygon,
-    ring_centroid_latlon,
     ring_to_mosaic_px,
-    tile_origin_for_meta,
 )
 
 
@@ -35,11 +33,6 @@ def _meta_for_bbox(
         height_px=(tile_y1 - tile_y0 + 1) * TILE_SIZE,
         provider="test",
     )
-
-
-def test_ring_centroid_average():
-    ring = [(0.0, 0.0), (0.0, 2.0), (2.0, 2.0), (2.0, 0.0), (0.0, 0.0)]
-    assert ring_centroid_latlon(ring) == (1.0, 1.0)
 
 
 def test_ring_to_mosaic_px_non_empty():

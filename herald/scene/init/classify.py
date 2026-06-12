@@ -1,340 +1,296 @@
-"""Polygon classification: OSM templates or per-polygon dual-image VLM."""
+"""Populate semantic fields on scene graph nodes."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Callable
+import io
+import math
+from typing import Any
 
 import requests
-from PIL import Image
+from PIL import Image, ImageDraw
 
-from herald.scene.init.hierarchy import SITE_OSM_ID, HierarchyNode
-from services.aerial.fetch import AerialMeta, crop_polygon_views, highlight_polygon
-from services.vlm.schema import EntityClassification
-from utils.osm_helpers import context_tags, has_strong_classification_tag
+from herald.scene.common.geometry import Frame
+from herald.scene.common.graph import SceneGraph, SceneNode
+from herald.scene.common.progress import iter_progress
+
+_STRONG_TAGS = frozenset(
+    {
+        "building",
+        "building:part",
+        "amenity",
+        "leisure",
+        "landuse",
+        "natural",
+        "tourism",
+        "shop",
+        "office",
+        "healthcare",
+        "historic",
+        "sport",
+        "water",
+    }
+)
+_TILE = 256
+_HIGHLIGHT = (255, 40, 40, 140)
 
 
-@dataclass(frozen=True)
-class NodeClassification:
-    """Public classification record (plain strings, no enum types)."""
+def level_for_role(role: str) -> str:
+    if role in ("site", "structure"):
+        return role
+    return "region"
 
-    role: str
-    category: str
-    function: str
-    name: str
-    description: str
-    confidence: float
-    source: str
+
+def _ring(node: SceneNode) -> list[tuple[float, float]]:
+    ring = [(float(r[0]), float(r[1])) for r in node.geom.coords]
+    if ring and ring[0] != ring[-1]:
+        ring.append(ring[0])
+    return ring
+
+
+def _tags(node: SceneNode) -> dict[str, str]:
+    for ref in node.refs:
+        if ref.assigned_by == "osm":
+            raw = ref.metadata.get("tags")
+            if isinstance(raw, dict):
+                return dict(raw)
+    return {}
+
+
+def _ctx(tags: dict[str, str]) -> dict[str, str]:
+    skip = {"source", "check_date", "created_by", "note", "fixme", "todo", "description"}
+    return {
+        k: v
+        for k, v in sorted(tags.items())
+        if k not in skip and not k.startswith(("addr:", "ref:", "source:", "contact:"))
+    }
 
 
 def _pick_name(tags: dict[str, str]) -> str:
     for key in ("name", "alt_name", "short_name", "ref"):
-        value = tags.get(key)
-        if value:
-            return value
+        if tags.get(key):
+            return tags[key]
     return ""
 
 
-def _building_function(tags: dict[str, str]) -> str:
-    building = tags.get("building", "yes")
-    mapping = {
-        "university": "academic",
-        "college": "academic",
-        "school": "academic",
-        "dormitory": "residential",
-        "residential": "residential",
-        "garage": "utility",
-        "service": "utility",
-        "roof": "utility",
-        "construction": "unknown",
-    }
-    if building in mapping:
-        return mapping[building]
-    amenity = tags.get("amenity", "")
-    if amenity in {"university", "school", "college"}:
-        return "academic"
-    if amenity in {"restaurant", "fast_food", "cafe"}:
-        return "dining"
-    return "unknown"
-
-
-def _template_from_tags(node: HierarchyNode) -> NodeClassification | None:
-    tags = node.tags
-    if not has_strong_classification_tag(tags):
-        return None
-
+def _apply_template(node: SceneNode, tags: dict[str, str]) -> bool:
+    if not any(k in _STRONG_TAGS for k in tags):
+        return False
     name = _pick_name(tags)
 
     if tags.get("building") or tags.get("building:part"):
-        fn = _building_function(tags)
-        desc = name or f"{tags.get('building', 'yes')} building"
+        b = tags.get("building", "yes")
+        fn = (
+            "academic"
+            if b in {"university", "college", "school"}
+            else "residential"
+            if b in {"dormitory", "residential"}
+            else "utility"
+            if b in {"garage", "service", "roof"}
+            else "unknown"
+        )
+        desc = name or f"{b} building"
         if tags.get("building:levels"):
             desc = f"{desc}, {tags['building:levels']} levels"
-        return NodeClassification(
-            role="structure",
-            category="building",
-            function=fn,
-            name=name,
-            description=desc[:240],
-            confidence=0.95,
-            source="osm_template",
-        )
+        node.role, node.category, node.function = "structure", "building", fn
+        node.name, node.desc = name, desc[:240]
+        return True
 
     if tags.get("amenity") in {"parking", "parking_space"}:
-        return NodeClassification(
-            role="facility",
-            category="parking",
-            function="transport",
-            name=name,
-            description=name or "vehicle parking area",
-            confidence=0.95,
-            source="osm_template",
-        )
+        node.role, node.category, node.function = "facility", "parking", "transport"
+        node.name, node.desc = name, name or "vehicle parking area"
+        return True
 
-    if tags.get("leisure") in {"pitch", "sports_centre", "fitness_station", "swimming_pool"}:
-        sport = tags.get("sport", tags["leisure"])
-        desc = name or f"{tags['leisure']} area ({sport})"
-        return NodeClassification(
-            role="facility",
-            category="recreation",
-            function="sports",
-            name=name,
-            description=desc[:240],
-            confidence=0.95,
-            source="osm_template",
-        )
+    leisure = tags.get("leisure")
+    if leisure in {"pitch", "sports_centre", "fitness_station", "swimming_pool"}:
+        node.role, node.category, node.function = "facility", "recreation", "sports"
+        node.name, node.desc = name, (name or f"{leisure} area ({tags.get('sport', leisure)})")[:240]
+        return True
 
-    if tags.get("leisure") in {"park", "garden", "playground"}:
-        return NodeClassification(
-            role="region_use",
-            category="vegetation" if tags.get("leisure") == "garden" else "recreation",
-            function="none",
-            name=name,
-            description=name or f"{tags['leisure']} area",
-            confidence=0.9,
-            source="osm_template",
-        )
+    if leisure in {"park", "garden", "playground"}:
+        cat = "vegetation" if leisure == "garden" else "recreation"
+        node.role, node.category, node.function = "region_use", cat, "none"
+        node.name, node.desc = name, name or f"{leisure} area"
+        return True
 
     landuse = tags.get("landuse")
     if landuse:
-        category = "vegetation"
-        if landuse in {"reservoir", "basin", "pond"}:
-            category = "water"
-        fn = "none"
-        if landuse in {"commercial", "retail"}:
-            fn = "retail"
-        return NodeClassification(
-            role="region_use",
-            category=category,
-            function=fn,
-            name=name,
-            description=name or f"{landuse} land",
-            confidence=0.9,
-            source="osm_template",
-        )
+        cat = "water" if landuse in {"reservoir", "basin", "pond"} else "vegetation"
+        fn = "retail" if landuse in {"commercial", "retail"} else "none"
+        node.role, node.category, node.function = "region_use", cat, fn
+        node.name, node.desc = name, name or f"{landuse} land"
+        return True
 
     natural = tags.get("natural")
     if natural:
-        category = "water" if natural == "water" else "vegetation"
-        return NodeClassification(
-            role="region_use",
-            category=category,
-            function="none",
-            name=name,
-            description=name or f"{natural} area",
-            confidence=0.9,
-            source="osm_template",
-        )
+        cat = "water" if natural == "water" else "vegetation"
+        node.role, node.category, node.function = "region_use", cat, "none"
+        node.name, node.desc = name, name or f"{natural} area"
+        return True
 
     amenity = tags.get("amenity")
     if amenity:
-        fn_map = {
-            "university": "academic",
-            "school": "academic",
-            "charging_station": "transport",
-            "shelter": "transport",
-        }
-        return NodeClassification(
-            role="facility",
-            category="service_point",
-            function=fn_map.get(amenity, "unknown"),
-            name=name,
-            description=name or f"{amenity} facility",
-            confidence=0.9,
-            source="osm_template",
+        fn = {"university": "academic", "school": "academic", "charging_station": "transport", "shelter": "transport"}.get(
+            amenity, "unknown"
         )
+        node.role, node.category, node.function = "facility", "service_point", fn
+        node.name, node.desc = name, name or f"{amenity} facility"
+        return True
 
-    return None
-
-
-def _entity_to_public(item: EntityClassification, *, source: str) -> NodeClassification:
-    return NodeClassification(
-        role=item.role.value,
-        category=item.category.value,
-        function=item.function.value,
-        name=item.name,
-        description=item.desc,
-        confidence=item.confidence,
-        source=source,
-    )
+    return False
 
 
-def _fallback_unclassified(node: HierarchyNode) -> NodeClassification:
-    tags = context_tags(node.tags)
-    hint = ", ".join(f"{k}={v}" for k, v in sorted(tags.items())[:4])
-    desc = f"unclassified area ({hint})" if hint else "unclassified area"
-    return NodeClassification(
-        role="unclassified",
-        category="unknown",
-        function="unknown",
-        name=_pick_name(node.tags),
-        description=desc[:240],
-        confidence=0.3,
-        source="fallback",
-    )
+def _apply_fallback(node: SceneNode, tags: dict[str, str]) -> None:
+    ctx = _ctx(tags)
+    hint = ", ".join(f"{k}={v}" for k, v in sorted(ctx.items())[:4])
+    node.role, node.category, node.function = "unclassified", "unknown", "unknown"
+    node.name = _pick_name(tags)
+    node.desc = (f"unclassified area ({hint})" if hint else "unclassified area")[:240]
 
 
-def build_vlm_context(
-    node: HierarchyNode,
+def _latlon_px(lat: float, lon: float, zoom: int, tx0: int, ty0: int) -> tuple[float, float]:
+    lat_r = math.radians(lat)
+    n = 2.0**zoom
+    tx = (lon + 180.0) / 360.0 * n
+    ty = (1.0 - math.log(math.tan(lat_r) + 1.0 / math.cos(lat_r)) / math.pi) / 2.0 * n
+    return (tx - tx0) * _TILE, (ty - ty0) * _TILE
+
+
+def _tile_origin(bbox: tuple[float, float, float, float], zoom: int) -> tuple[int, int]:
+    south, west, _, _ = bbox
+    lat_r = math.radians(south)
+    n = 2.0**zoom
+    tx = (west + 180.0) / 360.0 * n
+    ty = (1.0 - math.log(math.tan(lat_r) + 1.0 / math.cos(lat_r)) / math.pi) / 2.0 * n
+    return int(math.floor(tx)), int(math.floor(ty))
+
+
+def _highlight(base: Image.Image, poly: list[tuple[float, float]]) -> Image.Image:
+    if len(poly) < 3:
+        return base.copy()
+    out = base.convert("RGBA")
+    layer = Image.new("RGBA", out.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+    draw.polygon(poly, fill=_HIGHLIGHT, outline=(_HIGHLIGHT[0], _HIGHLIGHT[1], _HIGHLIGHT[2], 255), width=3)
+    return Image.alpha_composite(out, layer).convert("RGB")
+
+
+def _crop_views(
+    aerial: Image.Image,
+    ring: list[tuple[float, float]],
     *,
-    child_count: int = 0,
-    depth: int = 0,
-) -> dict[str, Any]:
-    tags = context_tags(node.tags)
-    ctx: dict[str, Any] = {
-        "osm_id": node.osm_id,
-        "osm_type": node.osm_type,
-        "area_m2": round(node.area, 1),
-        "child_count": child_count,
-        "depth": depth,
-        "tags": tags,
-        "name": _pick_name(node.tags),
-    }
-    if node.parent_osm_id is not None:
-        ctx["parent_osm_id"] = node.parent_osm_id
-    return ctx
-
-
-def classify_from_osm_template(node: HierarchyNode) -> NodeClassification | None:
-    return _template_from_tags(node)
-
-
-def fallback_classification(node: HierarchyNode) -> NodeClassification:
-    return _fallback_unclassified(node)
-
-
-def _classify_one_with_vlm(
-    node: HierarchyNode,
-    *,
-    aerial_image: Image.Image,
-    aerial_meta: AerialMeta,
-    depth: int,
-    vlm_model: str,
-    http: requests.Session,
+    bbox: tuple[float, float, float, float],
+    zoom: int,
+    session: requests.Session,
     osm_cache: dict[tuple[int, int, int, int, int], Image.Image],
-) -> NodeClassification:
-    from services.vlm.client import classify_polygon
+) -> tuple[Image.Image, Image.Image, list[tuple[float, float]]]:
+    tx0, ty0 = _tile_origin(bbox, zoom)
+    pts = [_latlon_px(lat, lon, zoom, tx0, ty0) for lat, lon in ring[:-1]]
+    xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+    pad = 24
+    left = max(0, int(math.floor(min(xs))) - pad)
+    top = max(0, int(math.floor(min(ys))) - pad)
+    right = min(aerial.width, int(math.ceil(max(xs))) + pad)
+    bottom = min(aerial.height, int(math.ceil(max(ys))) + pad)
 
-    context = build_vlm_context(
-        node,
-        child_count=len(node.child_osm_ids),
-        depth=depth,
-    )
-    try:
-        aerial_crop, osm_crop, local_poly = crop_polygon_views(
-            aerial_image,
-            aerial_meta,
-            list(node.geom),
-            session=http,
-            osm_cache=osm_cache,
-        )
-        aerial_view = highlight_polygon(aerial_crop, local_poly)
-        osm_view = highlight_polygon(osm_crop, local_poly)
-        item = classify_polygon(
-            aerial_view,
-            osm_view,
-            context,
-            model=vlm_model,
-        )
-        if item is not None:
-            return _entity_to_public(item, source="vlm")
-    except Exception:
-        pass
-
-    template = _template_from_tags(node)
-    if template is not None:
-        return template
-    return _fallback_unclassified(node)
+    full_tx0, full_ty0 = tx0, ty0
+    sub_tx0 = full_tx0 + left // _TILE
+    sub_ty0 = full_ty0 + top // _TILE
+    sub_tx1 = full_tx0 + (right - 1) // _TILE
+    sub_ty1 = full_ty0 + (bottom - 1) // _TILE
+    key = (zoom, sub_tx0, sub_ty0, sub_tx1, sub_ty1)
+    if key not in osm_cache:
+        cols, rows = sub_tx1 - sub_tx0 + 1, sub_ty1 - sub_ty0 + 1
+        mosaic = Image.new("RGB", (cols * _TILE, rows * _TILE))
+        for ty in range(sub_ty0, sub_ty1 + 1):
+            for tx in range(sub_tx0, sub_tx1 + 1):
+                url = f"https://tile.openstreetmap.org/{zoom}/{tx}/{ty}.png"
+                resp = session.get(url, timeout=30, headers={"User-Agent": "HERALD/1.0"})
+                resp.raise_for_status()
+                tile = Image.open(io.BytesIO(resp.content)).convert("RGB")
+                mosaic.paste(tile, ((tx - sub_tx0) * _TILE, (ty - sub_ty0) * _TILE))
+        osm_cache[key] = mosaic
+    local_l = left - (sub_tx0 - full_tx0) * _TILE
+    local_t = top - (sub_ty0 - full_ty0) * _TILE
+    osm = osm_cache[key].crop((local_l, local_t, local_l + (right - left), local_t + (bottom - top)))
+    local_poly = [(x - left, y - top) for x, y in pts]
+    return aerial.crop((left, top, right, bottom)), osm, local_poly
 
 
-def classify_hierarchy_nodes(
-    nodes: list[HierarchyNode],
+def _site_bbox(graph: SceneGraph, frame: Frame) -> tuple[float, float, float, float]:
+    site = graph.site_node()
+    if site is None:
+        return (frame.lat, frame.lon, frame.lat, frame.lon)
+    ring = _ring(site)
+    lats = [p[0] for p in ring]
+    lons = [p[1] for p in ring]
+    return min(lats), min(lons), max(lats), max(lons)
+
+
+def build_feat(
+    graph: SceneGraph,
+    frame: Frame,
+    aerial: Image.Image | None = None,
     *,
-    use_vlm: bool,
-    aerial_image: Image.Image | None = None,
-    aerial_meta: AerialMeta | None = None,
+    aerial_zoom: int = 18,
+    use_vlm: bool = False,
     vlm_model: str | None = None,
-    depths: dict[int, int] | None = None,
     show_progress: bool = True,
-    on_node_classified: Callable[[HierarchyNode, NodeClassification], None] | None = None,
-) -> dict[int, NodeClassification]:
-    """Classify hierarchy polygons.
+) -> None:
+    by_id = {n.id: n for n in graph.nodes}
 
-    Without VLM: OSM tag templates, then fallback (descriptions are embedded later).
-    With VLM: one dual-image (aerial + OSM map) call per polygon.
-    """
-    from herald.scene.common.progress import iter_progress
-    from services.vlm.client import DEFAULT_MODEL
+    def depth(node: SceneNode) -> int:
+        d, pid = 0, node.pid
+        while pid and pid in by_id:
+            d += 1
+            pid = by_id[pid].pid
+        return d
 
-    if not nodes:
-        return {}
+    polygons = sorted((n for n in graph.nodes if n.type != "site"), key=lambda n: (depth(n), n.id))
+    site = graph.site_node()
+    if site is not None:
+        site.role, site.category, site.function = "site", "ground_other", "none"
+        site.desc = f"site at ({frame.lat:.5f}, {frame.lon:.5f}), {len(polygons)} polygons"
 
-    depth_map = depths or {}
-    model = vlm_model or DEFAULT_MODEL
-    vlm_ready = (
-        use_vlm and aerial_image is not None and aerial_meta is not None
-    )
-
-    results: dict[int, NodeClassification] = {}
+    aerial_bbox = _site_bbox(graph, frame) if aerial is not None else None
+    vlm_ready = use_vlm and aerial is not None
     http = requests.Session() if vlm_ready else None
     osm_cache: dict[tuple[int, int, int, int, int], Image.Image] = {}
 
-    for node in iter_progress(
-        nodes,
-        desc="Classifying polygons",
-        total=len(nodes),
-        disable=not show_progress,
-    ):
-        if node.osm_id == SITE_OSM_ID:
-            continue
+    for node in iter_progress(polygons, desc="Classifying polygons", total=len(polygons), disable=not show_progress):
+        tags = _tags(node)
+        if vlm_ready and http is not None and aerial is not None:
+            ctx: dict[str, Any] = {
+                "node_id": node.id,
+                "area": round(float(node.refs[0].metadata.get("area", 0)), 1) if node.refs else 0,
+                "child_count": sum(1 for n in graph.nodes if n.pid == node.id),
+                "depth": depth(node),
+                "tags": _ctx(tags),
+                "name": _pick_name(tags),
+            }
+            if node.pid:
+                ctx["parent_id"] = node.pid
+            try:
+                from services.vlm.client import DEFAULT_MODEL, classify_polygon
 
-        if vlm_ready and http is not None:
-            classification = _classify_one_with_vlm(
-                node,
-                aerial_image=aerial_image,
-                aerial_meta=aerial_meta,
-                depth=depth_map.get(node.osm_id, 0),
-                vlm_model=model,
-                http=http,
-                osm_cache=osm_cache,
-            )
-        else:
-            classification = _template_from_tags(node) or _fallback_unclassified(node)
+                ring = _ring(node)
+                a_crop, o_crop, local = _crop_views(
+                    aerial, ring, bbox=aerial_bbox, zoom=aerial_zoom, session=http, osm_cache=osm_cache
+                )
+                item = classify_polygon(
+                    _highlight(a_crop, local),
+                    _highlight(o_crop, local),
+                    ctx,
+                    model=vlm_model or DEFAULT_MODEL,
+                )
+                if item is not None:
+                    node.role = item.role.value
+                    node.category = item.category.value
+                    node.function = item.function.value
+                    node.name = item.name
+                    node.desc = item.desc
+                    continue
+            except Exception:
+                pass
 
-        results[node.osm_id] = classification
-        if on_node_classified is not None:
-            on_node_classified(node, classification)
-
-    return results
-
-
-def level_for_role(role: str) -> str:
-    if role == "structure":
-        return "building"
-    return "outdoor_region"
-
-
-def zone_kind_for_role(role: str) -> str:
-    if role == "structure":
-        return "building"
-    return "outdoor_region"
+        if not _apply_template(node, tags):
+            _apply_fallback(node, tags)

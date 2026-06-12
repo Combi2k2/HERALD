@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from herald.browser import open_browser as launch_browser
+from herald.scene.common.geometry import Frame
 from herald.scene.common.graph import SceneGraph
 from herald.scene.common.roi import ROI
 from herald.ui.roi_picker import ROIPickerError
@@ -105,11 +106,12 @@ def _overlay_layers_payload(
     *,
     roi: ROI,
     osm_polygons_geojson: dict,
+    frame: Frame | None = None,
     graph: SceneGraph | None = None,
     pathways_geojson: dict | None = None,
 ) -> dict:
     """Layer payload for the live Leaflet UI (`GET /overlay/layers.json`)."""
-    lat, lon = roi.centroid_latlon()
+    lat, lon = roi.latlon_centroid()
     layers: list[dict] = [
         {
             "name": "ROI boundary",
@@ -125,7 +127,7 @@ def _overlay_layers_payload(
                 "features": [
                     _geojson_polygon_feature(
                         roi.latlon_vertices(),
-                        popup=f"ROI area {roi.area_m2() / 1e6:.3f} km²",
+                        popup=f"ROI area {roi.area() / 1e6:.3f} km²",
                     )
                 ],
             },
@@ -168,17 +170,32 @@ def _overlay_layers_payload(
         outdoor_features = []
         building_features = []
         for node in graph.nodes:
-            if node.level == "outdoor_region":
+            popup = html.escape(node.desc or node.name or node.id)
+            if node.type == "region":
+                if node.geom.frame == "ENU":
+                    if frame is None:
+                        raise ValueError("frame is required to map ENU scene graph geometry")
+                    ring = [
+                        frame.enu2wgs(float(row[0]), float(row[1]))
+                        for row in node.geom.coords
+                    ]
+                else:
+                    ring = [(float(row[0]), float(row[1])) for row in node.geom.coords]
                 outdoor_features.append(
-                    _geojson_polygon_feature(
-                        node.geometry_latlon, popup=html.escape(node.text)
-                    )
+                    _geojson_polygon_feature(ring, popup=popup)
                 )
-            elif node.level == "building":
+            elif node.type == "structure":
+                if node.geom.frame == "ENU":
+                    if frame is None:
+                        raise ValueError("frame is required to map ENU scene graph geometry")
+                    ring = [
+                        frame.enu2wgs(float(row[0]), float(row[1]))
+                        for row in node.geom.coords
+                    ]
+                else:
+                    ring = [(float(row[0]), float(row[1])) for row in node.geom.coords]
                 building_features.append(
-                    _geojson_polygon_feature(
-                        node.geometry_latlon, popup=html.escape(node.text)
-                    )
+                    _geojson_polygon_feature(ring, popup=popup)
                 )
         if outdoor_features:
             layers.append(
@@ -275,6 +292,7 @@ def _write_overlay_map_html(
     *,
     roi: ROI,
     osm_polygons_geojson: dict,
+    frame: Frame | None = None,
     graph: SceneGraph | None = None,
     pathways_geojson: dict | None = None,
 ) -> None:
@@ -285,6 +303,7 @@ def _write_overlay_map_html(
     payload = _overlay_layers_payload(
         roi=roi,
         osm_polygons_geojson=osm_polygons_geojson,
+        frame=frame,
         graph=graph,
         pathways_geojson=pathways_geojson,
     )
@@ -526,6 +545,7 @@ class SceneOverlayServer:
         self,
         *,
         roi: ROI,
+        frame: Frame,
         osm_polygons_geojson: dict,
         graph: SceneGraph,
         pathways_geojson: dict,
@@ -534,6 +554,7 @@ class SceneOverlayServer:
         self._overlay_layers = _overlay_layers_payload(
             roi=roi,
             osm_polygons_geojson=osm_polygons_geojson,
+            frame=frame,
             graph=graph,
             pathways_geojson=pathways_geojson,
         )
@@ -563,7 +584,7 @@ class SceneOverlayServer:
                 "ROI picker timed out. Draw a rectangle on the map or pass --bbox."
             )
         assert self._roi_vertices is not None
-        return ROI.from_latlon_ring(self._roi_vertices)
+        return ROI.from_polygon(self._roi_vertices)
 
     def block_until_interrupt(self) -> None:
         print("Map server running — Ctrl+C to exit.")

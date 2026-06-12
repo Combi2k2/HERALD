@@ -5,30 +5,26 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from herald.scene.init.classify import NodeClassification
+from herald.scene.common.graph import SceneGraph
 from services.osm.client import OSMFeature, OSMRawPolygon
 
 
-def classifications_to_json(classifications: dict[int, NodeClassification]) -> dict:
+def annotations_from_graph(graph: SceneGraph) -> dict:
     return {
-        str(osm_id): {
-            "role": c.role,
-            "category": c.category,
-            "function": c.function,
-            "name": c.name,
-            "description": c.description,
-            "confidence": c.confidence,
-            "source": c.source,
+        node.id: {
+            "role": node.role,
+            "category": node.category,
+            "function": node.function,
+            "name": node.name,
+            "description": node.desc,
         }
-        for osm_id, c in sorted(classifications.items())
+        for node in sorted(graph.nodes, key=lambda n: n.id)
+        if node.role
     }
 
 
-def save_classifications(path: Path, classifications: dict[int, NodeClassification]) -> None:
-    path.write_text(
-        json.dumps(classifications_to_json(classifications), indent=2),
-        encoding="utf-8",
-    )
+def save_annotations(path: Path, graph: SceneGraph) -> None:
+    path.write_text(json.dumps(annotations_from_graph(graph), indent=2), encoding="utf-8")
 
 
 def pathways_to_geojson(pathways: list[OSMFeature]) -> dict:
@@ -39,7 +35,6 @@ def pathways_to_geojson(pathways: list[OSMFeature]) -> dict:
 
 
 def pathways_from_geojson(data: dict) -> list[OSMFeature]:
-    """Rehydrate pathway features saved as GeoJSON."""
     features: list[OSMFeature] = []
     for i, feat in enumerate(data.get("features", [])):
         geom = feat.get("geometry", {})
@@ -61,7 +56,6 @@ def pathways_from_geojson(data: dict) -> list[OSMFeature]:
 
 
 def raw_polygons_from_geojson(data: dict) -> list[OSMRawPolygon]:
-    """Rehydrate raw OSM polygons saved as GeoJSON."""
     polygons: list[OSMRawPolygon] = []
     for feat in data.get("features", []):
         geom = feat.get("geometry", {})

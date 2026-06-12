@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-# Vertical spacing between ancestor map layers (metres, local ENU Z-up).
-LAYER_HEIGHT_M = 225.0
+# Vertical spacing between ancestor map layers (local ENU Z-up).
+LAYER_HEIGHT = 225.0
 GROUND_Z = 0.0
 SITE_ID = "site_000"
 
@@ -74,7 +74,7 @@ def depth_from_site(
     return result
 
 
-def ancestor_layer_z_m(
+def ancestor_layer_z(
     node_id: str,
     children_map: dict[str, list[str]],
     *,
@@ -85,4 +85,4 @@ def ancestor_layer_z_m(
     if node_id == site_id or is_containment_leaf(node_id, children_map):
         return None
     depth = depth_from_site(node_id, children_map, site_id=site_id, cache=cache)
-    return depth * LAYER_HEIGHT_M
+    return depth * LAYER_HEIGHT

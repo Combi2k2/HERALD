@@ -42,17 +42,6 @@ class AerialMeta:
             "provider": self.provider,
         }
 
-    @classmethod
-    def from_dict(cls, data: dict) -> AerialMeta:
-        bbox = data["bbox"]
-        return cls(
-            bbox=(float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])),
-            zoom=int(data["zoom"]),
-            width_px=int(data["width_px"]),
-            height_px=int(data["height_px"]),
-            provider=str(data["provider"]),
-        )
-
 
 def _latlon_to_tile_xy(lat: float, lon: float, zoom: int) -> tuple[float, float]:
     lat_rad = math.radians(lat)
@@ -133,17 +122,6 @@ def save_aerial(
     image_path.parent.mkdir(parents=True, exist_ok=True)
     image.save(image_path, format="PNG")
     meta_path.write_text(json.dumps(meta.to_dict(), indent=2), encoding="utf-8")
-
-
-def ring_centroid_latlon(ring: list[tuple[float, float]]) -> tuple[float, float]:
-    """Centroid of a closed lat/lon ring (simple average of vertices)."""
-    closed = ring if ring and ring[0] == ring[-1] else [*ring, ring[0]]
-    verts = closed[:-1]
-    if not verts:
-        return (0.0, 0.0)
-    lat = sum(p[0] for p in verts) / len(verts)
-    lon = sum(p[1] for p in verts) / len(verts)
-    return lat, lon
 
 
 def tile_origin_for_meta(meta: AerialMeta) -> tuple[int, int]:

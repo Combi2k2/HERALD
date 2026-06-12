@@ -48,14 +48,14 @@ PATHWAY_HIGHWAY_VALUES = frozenset(
 def polygon_disposition(
     tags: dict[str, str],
     *,
-    area_m2: float,
-    min_area_m2: float,
-    max_area_m2: float,
+    area: float,
+    min_area: float,
+    max_area: float,
 ) -> PolygonDisposition:
     """Decide whether a polygon participates in the containment hierarchy."""
-    if area_m2 < min_area_m2:
+    if area < min_area:
         return "excluded"
-    if area_m2 > max_area_m2:
+    if area > max_area:
         return "excluded"
 
     if tags.get("boundary"):

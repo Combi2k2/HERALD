@@ -5,7 +5,6 @@ import numpy as np
 from services.embeddings.encoder import StubEncoder
 from herald.scene.common.geometry import Frame, Geometry, Vec3
 from herald.scene.common.graph import SceneGraph, SceneNode, SourceRef
-from herald.scene.common._legacy_v2 import scene_node_from_v2
 
 
 def _sample_graph() -> SceneGraph:
@@ -112,36 +111,6 @@ def test_json_round_trip(tmp_path):
     payload = loaded.to_dict()
     assert "site_id" not in payload
     assert "frame_origin" not in payload
-
-
-def test_v2_node_loads_into_v3_shape():
-    legacy = {
-        "id": "node_1",
-        "type": "building",
-        "zone_kind": "building",
-        "text": "hall caption",
-        "geometry_latlon": [[48.711, 2.201], [48.7115, 2.2015], [48.7115, 2.201]],
-        "embedding": [0.1, 0.2],
-        "height_m": 12.0,
-        "height_source": "default",
-        "osm_id": 1,
-        "role": "structure",
-        "category": "building",
-        "function": "academic",
-        "name": "Hall A",
-        "confidence": 0.95,
-        "classification_source": "osm_template",
-        "osm_tags": {"building": "university"},
-    }
-    node = scene_node_from_v2(legacy)
-    assert node.type == "structure"
-    assert node.name == "Hall A"
-    assert node.desc == "hall caption"
-    assert node.geom.frame == "WGS"
-    assert node.geom.offset[2] == 12.0
-    assert node.refs[0].assigned_id == "way/1"
-    assert node.refs[0].assigned_by == "osm"
-    assert node.txt_embedding_ref is None
 
 
 def test_stub_encoder_deterministic():

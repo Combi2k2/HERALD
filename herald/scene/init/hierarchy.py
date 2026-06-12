@@ -1,187 +1,72 @@
-"""Build a containment forest from OSM polygon footprints."""
+"""Build a containment hierarchy from OSM polygon footprints."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
-from pyproj import Transformer
+from numpy.matlib import identity
 from shapely.geometry import Polygon
 from shapely.strtree import STRtree
 
-from herald.scene.common.roi import ROI
-from services.osm.client import OSMRawPolygon
-from utils.osm_filter import polygon_disposition
+from herald.scene.common.geometry import Frame
+from herald.scene.common.graph import SceneGraph, SceneEdge
 
-SITE_OSM_ID = 0
-
-MIN_NODE_AREA_M2 = 30.0
-MAX_NODE_AREA_M2 = 20_000.0
+MIN_NODE_AREA = 30.0
+MAX_NODE_AREA = 20_000.0
 CONTAINMENT_RATIO = 0.90
 
 
-def graph_node_id(osm_id: int) -> str:
-    """Map hierarchy ``osm_id`` to scene-graph node id (site stays ``site_000``)."""
-    return "site_000" if osm_id == SITE_OSM_ID else f"node_{osm_id}"
-
-
-@dataclass(frozen=True)
-class HierarchyNode:
-    osm_id: int
-    osm_type: str
-    tags: dict[str, str]
-    geom: list[tuple[float, float]]
-    area: float
-    parent_osm_id: int | None = None
-    child_osm_ids: tuple[int, ...] = ()
-
-
-@dataclass(frozen=True)
-class ContainmentForest:
-    nodes: dict[int, HierarchyNode]
-    others: tuple[int, ...]
-
-    @property
-    def site_children(self) -> tuple[int, ...]:
-        site = self.nodes.get(SITE_OSM_ID)
-        if site is None:
-            return ()
-        return site.child_osm_ids
-
-
-def _utm_transformer(roi: ROI) -> Transformer:
-    lat_c, lon_c = roi.centroid_latlon()
-    utm_zone = int((lon_c + 180) / 6) + 1
-    hemisphere = "north" if lat_c >= 0 else "south"
-    crs = f"+proj=utm +zone={utm_zone} +{hemisphere} +ellps=WGS84"
-    return Transformer.from_crs("EPSG:4326", crs, always_xy=True)
-
-
-def _ring_to_polygon(
-    ring: list[tuple[float, float]], transformer: Transformer
-) -> Polygon | None:
-    if len(ring) < 3:
-        return None
-    closed = ring if ring[0] == ring[-1] else [*ring, ring[0]]
-    try:
-        coords = [transformer.transform(lon, lat) for lat, lon in closed]
-        poly = Polygon(coords)
-        if not poly.is_valid:
-            poly = poly.buffer(0)
-        if poly.is_empty:
-            return None
-        return poly
-    except Exception:
-        return None
-
-
-def _containment_ratio(inner: Polygon, outer: Polygon) -> float:
-    if inner.is_empty or inner.area <= 0:
-        return 0.0
-    return inner.intersection(outer).area / inner.area
-
-
-def _closed_roi_ring(roi: ROI) -> list[tuple[float, float]]:
-    ring = list(roi.latlon_vertices())
-    if ring and ring[0] != ring[-1]:
-        ring.append(ring[0])
-    return ring
-
-
-def build_containment_forest(
-    polygons: list[OSMRawPolygon],
-    roi: ROI,
+def build_tree(
+    graph: SceneGraph,
+    frame: Frame,
     *,
-    min_area_m2: float = MIN_NODE_AREA_M2,
-    max_area_m2: float = MAX_NODE_AREA_M2,
+    min_area: float = MIN_NODE_AREA,
+    max_area: float = MAX_NODE_AREA,
     containment_ratio: float = CONTAINMENT_RATIO,
-) -> ContainmentForest:
-    """Assign parent/child links using real containment with area thresholds."""
-    to_utm = _utm_transformer(roi)
+) -> None:
+    records: list[tuple[Polygon, float, str]] = []
 
-    records: list[tuple[OSMRawPolygon, Polygon, float]] = []
-    others: list[int] = []
+    for i, node in enumerate(graph.nodes):
+        ring = [[p[0], p[1]] for p in node.geom.coords]
+        ring = ring + ([ring[0]] if ring[0] != ring[-1] else [])
 
-    for poly in polygons:
-        if poly.osm_id == SITE_OSM_ID:
-            others.append(poly.osm_id)
+        if len(ring) < 3:
             continue
-        ring = list(poly.geometry)
-        if ring and ring[0] != ring[-1]:
-            ring.append(ring[0])
-        utm_poly = _ring_to_polygon(ring, to_utm)
-        if utm_poly is None:
-            others.append(poly.osm_id)
-            continue
-        area_m2 = float(utm_poly.area)
-        disposition = polygon_disposition(
-            poly.tags,
-            area_m2=area_m2,
-            min_area_m2=min_area_m2,
-            max_area_m2=max_area_m2,
-        )
-        if disposition != "hierarchy":
-            others.append(poly.osm_id)
-            continue
-        records.append((poly, utm_poly, area_m2))
 
-    records.sort(key=lambda item: item[2])
+        if node.geom.frame == "WGS":    ring = [frame.wgs2utm(*p) for p in ring]
+        if node.geom.frame == "ENU":    ring = [frame.enu2utm(*p) for p in ring]
 
-    parent: dict[int, int | None] = {poly.osm_id: None for poly, _, _ in records}
-    children: dict[int, list[int]] = {poly.osm_id: [] for poly, _, _ in records}
+        poly = Polygon(ring)
+        area = float(poly.area)
 
-    geoms = [utm_poly for _, utm_poly, _ in records]
-    tree = STRtree(geoms) if geoms else None
+        if area < min_area: continue
+        if area > max_area: continue
 
-    for idx, (osm_poly, utm_poly, area) in enumerate(records):
-        best_parent: int | None = None
-        best_parent_area = float("inf")
-        if tree is None:
-            continue
-        for j in tree.query(utm_poly, predicate="intersects"):
-            if j == idx:
+        records.append((poly, area, i))
+
+    graph.edges = [e for e in graph.edges if e.edge_type != "contains"]
+    if not records:
+        return
+
+    tree = STRtree([p for p, _, _ in records])
+
+    for poly, area, id in records:
+        best_area = float("inf")
+        best_pid: str | None = None
+
+        for j in tree.query(poly, predicate="intersects"):
+            parent_poly, parent_area, pid = records[j]
+            if pid == id or parent_area <= area:
                 continue
-            parent_poly, parent_utm, parent_area = records[j]
-            if parent_area <= area:
-                continue
-            ratio = _containment_ratio(utm_poly, parent_utm)
-            if ratio >= containment_ratio and parent_area < best_parent_area:
-                best_parent = parent_poly.osm_id
-                best_parent_area = parent_area
-        if best_parent is not None:
-            parent[osm_poly.osm_id] = best_parent
-            children[best_parent].append(osm_poly.osm_id)
+            if (
+                parent_poly.intersection(poly).area >= containment_ratio * area
+                and parent_area < best_area
+            ):
+                best_area = parent_area
+                best_pid = pid
 
-    nodes: dict[int, HierarchyNode] = {}
-
-    for poly, _, area_m2 in records:
-        parent_id = parent[poly.osm_id] or SITE_OSM_ID
-        ring = list(poly.geometry)
-        if ring and ring[0] != ring[-1]:
-            ring.append(ring[0])
-        nodes[poly.osm_id] = HierarchyNode(
-            osm_id=poly.osm_id,
-            osm_type=poly.osm_type,
-            tags=dict(poly.tags),
-            geom=ring,
-            area=area_m2,
-            parent_osm_id=parent_id,
-            child_osm_ids=tuple(sorted(children[poly.osm_id])),
-        )
-
-    site_child_ids = tuple(
-        sorted(oid for oid, node in nodes.items() if node.parent_osm_id == SITE_OSM_ID)
-    )
-    nodes[SITE_OSM_ID] = HierarchyNode(
-        osm_id=SITE_OSM_ID,
-        osm_type="site",
-        tags={},
-        geom=_closed_roi_ring(roi),
-        area=roi.area_m2(),
-        parent_osm_id=None,
-        child_osm_ids=site_child_ids,
-    )
-
-    return ContainmentForest(
-        nodes=nodes,
-        others=tuple(sorted(set(others))),
-    )
+        if best_pid is not None:
+            graph.nodes[id].pid = best_pid
+            graph.edges.append(SceneEdge(
+                graph.node[best_pid].id,
+                graph.node[id].id,
+                "contains"
+            ))

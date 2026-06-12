@@ -9,7 +9,8 @@ import sys
 from pathlib import Path
 
 from herald.browser import suppress_gtk_atk_bridge_warning
-from herald.data import RunPaths
+from herald.data import FRAME_JSON, RunPaths
+from herald.scene.common.geometry import Frame
 from herald.scene.common.graph import SceneGraph
 from herald.scene.init import pathways_from_geojson, raw_polygons_from_geojson
 from herald.viewer.rerun_view import RerunSceneViewer
@@ -27,7 +28,6 @@ def main() -> None:
         "--graph",
         type=Path,
         default=None,
-        help="Override scene graph JSON",
     )
     args = parser.parse_args()
 
@@ -38,6 +38,11 @@ def main() -> None:
 
     if not graph_path.is_file():
         print(f"Error: graph not found: {graph_path}", file=sys.stderr)
+        raise SystemExit(1)
+
+    frame = Frame.load(FRAME_JSON)
+    if frame is None:
+        print(f"Error: site frame not found: {FRAME_JSON}", file=sys.stderr)
         raise SystemExit(1)
 
     graph = SceneGraph.from_json(graph_path)
@@ -55,10 +60,10 @@ def main() -> None:
         print(f"Warning: raw OSM not found: {paths.osm}", file=sys.stderr)
 
     viewer = RerunSceneViewer(spawn=True)
-    viewer.set_frame(graph.frame)
+    viewer.set_frame(frame)
     if raw_polygons:
         viewer.render_raw_osm_polygons(raw_polygons)
-    viewer.render_graph(graph, pathways=pathways)
+    viewer.render_graph(graph, frame=frame, pathways=pathways)
     print(f"Run: {paths.run_id}")
     print(f"Loaded {len(graph.nodes)} nodes from {graph_path}")
     print("Rerun viewer open — close the viewer window to exit.")

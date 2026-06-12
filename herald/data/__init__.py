@@ -4,6 +4,8 @@ from herald.data.paths import (
     AERIAL_META_JSON,
     AERIAL_PNG,
     ANNOTATIONS_JSON,
+    FRAME_JSON,
+    FRAME_JSON_NAME,
     MAP_OVERLAY_HTML,
     METADATA_JSON,
     OSM_GEOJSON,
@@ -15,6 +17,7 @@ from herald.data.paths import (
     RUN_ID_FORMAT,
     RUN_ROOT,
     SCENE_GRAPH_JSON,
+    SITE_DATA_ROOT,
     RunPaths,
 )
 from herald.data.tabulate import load_osm_geojson, osm_features_to_rows, write_osm_table
@@ -25,6 +28,9 @@ __all__ = [
     "ANNOTATIONS_JSON",
     "MAP_OVERLAY_HTML",
     "METADATA_JSON",
+    "FRAME_JSON",
+    "FRAME_JSON_NAME",
+    "SITE_DATA_ROOT",
     "OSM_GEOJSON",
     "PATHWAYS_GEOJSON",
     "PHASE1_ROOT",

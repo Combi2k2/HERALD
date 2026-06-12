@@ -21,7 +21,6 @@ DEFAULT_OVERPASS_URLS = (
     "https://lz4.overpass-api.de/api/interpreter",
     "https://overpass-api.de/api/interpreter",
 )
-DEFAULT_RADIUS_M = 200.0
 DEFAULT_TIMEOUT_S = 30.0
 DEFAULT_RAW_POLYGON_TIMEOUT_S = 180.0
 RAW_POLYGON_OVERPASS_TIMEOUT_S = 180
@@ -60,10 +59,6 @@ class OSMFeature:
     def name(self) -> str | None:
         return self.tags.get("name")
 
-    @property
-    def is_polygon(self) -> bool:
-        return self.kind == "polygon"
-
     def to_geojson_geometry(self) -> dict[str, Any]:
         """GeoJSON geometry (Polygon or LineString); coordinates are [lon, lat]."""
         coords = [[lon, lat] for lat, lon in self.geometry]
@@ -90,20 +85,6 @@ class OSMQueryResult:
     radius_m: float
     buildings: list[OSMFeature] = field(default_factory=list)
     highways: list[OSMFeature] = field(default_factory=list)
-
-    @property
-    def all_features(self) -> list[OSMFeature]:
-        return self.buildings + self.highways
-
-    def to_geojson(self) -> dict[str, Any]:
-        return {
-            "type": "FeatureCollection",
-            "properties": {
-                "center": {"lat": self.center.lat, "lon": self.center.lon},
-                "radius_m": self.radius_m,
-            },
-            "features": [f.to_geojson_feature() for f in self.all_features],
-        }
 
 
 @dataclass(frozen=True)
@@ -181,21 +162,6 @@ def _validate_polygon_vertices(
     for lat, lon in vertices_latlon:
         validated.append(_validate_lat_lon(lat, lon))
     return validated
-
-
-def _build_overpass_query(lat: float, lon: float, radius_m: float) -> str:
-    lat_f, lon_f = _validate_lat_lon(lat, lon)
-    r = max(1, int(float(radius_m)))
-    return f"""
-[out:json][timeout:25];
-(
-  way["building"](around:{r},{lat_f},{lon_f});
-  relation["building"](around:{r},{lat_f},{lon_f});
-  way["highway"](around:{r},{lat_f},{lon_f});
-  relation["highway"](around:{r},{lat_f},{lon_f});
-);
-out tags geom;
-""".strip()
 
 
 def _poly_coords_from_vertices(vertices_latlon: Sequence[tuple[float, float]]) -> str:
@@ -388,18 +354,6 @@ class OSMClient:
             f"({', '.join(self.overpass_urls)})"
         ) from last_error
 
-    def query_nearby(
-        self,
-        lat: float,
-        lon: float,
-        *,
-        radius_m: float = DEFAULT_RADIUS_M,
-    ) -> OSMQueryResult:
-        """Fetch building and highway geometries within ``radius_m`` of (lat, lon)."""
-        query = _build_overpass_query(lat, lon, radius_m)
-        payload = self._post_overpass(query)
-        return self._parse_response(lat, lon, radius_m, payload)
-
     def query_in_polygon(
         self,
         vertices_latlon: Sequence[tuple[float, float]],
@@ -486,22 +440,3 @@ class OSMClient:
             else:
                 result.highways.append(feature)
         return result
-
-
-def query_nearby(
-    lat: float,
-    lon: float,
-    *,
-    radius_m: float = DEFAULT_RADIUS_M,
-    overpass_urls: Sequence[str] | None = None,
-) -> OSMQueryResult:
-    """Convenience wrapper: query buildings and highways around (lat, lon)."""
-    return OSMClient(overpass_urls=overpass_urls).query_nearby(
-        lat, lon, radius_m=radius_m
-    )
-
-
-def save_geojson(result: OSMQueryResult, path: str) -> None:
-    """Write query result to a GeoJSON file."""
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(result.to_geojson(), f, indent=2)
