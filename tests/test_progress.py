@@ -1,6 +1,6 @@
 """Tests for progress helpers."""
 
-from herald.scene.common.progress import iter_progress, progress_task
+from herald.scene.common.progress import iter_progress, task_progress
 
 
 def test_iter_progress_disabled():
@@ -9,6 +9,6 @@ def test_iter_progress_disabled():
 
 
 def test_progress_task_disabled():
-    with progress_task("test", total=3, disable=True) as bar:
+    with task_progress("test", total=3, disable=True) as bar:
         bar.update(3)
         bar.set_postfix_str("done")
