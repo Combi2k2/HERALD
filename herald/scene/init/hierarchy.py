@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from numpy.matlib import identity
 from shapely.geometry import Polygon
 from shapely.strtree import STRtree
 
@@ -22,7 +21,7 @@ def build_tree(
     max_area: float = MAX_NODE_AREA,
     containment_ratio: float = CONTAINMENT_RATIO,
 ) -> None:
-    records: list[tuple[Polygon, float, str]] = []
+    records: list[tuple[Polygon, float, int]] = []
 
     for i, node in enumerate(graph.nodes):
         ring = [[p[0], p[1]] for p in node.geom.coords]
@@ -37,12 +36,12 @@ def build_tree(
         poly = Polygon(ring)
         area = float(poly.area)
 
-        if area < min_area: continue
-        if area > max_area: continue
+        if node.type != "site":
+            if area < min_area: continue
+            if area > max_area: continue
 
         records.append((poly, area, i))
-
-    graph.edges = [e for e in graph.edges if e.edge_type != "contains"]
+    
     if not records:
         return
 
@@ -50,7 +49,7 @@ def build_tree(
 
     for poly, area, id in records:
         best_area = float("inf")
-        best_pid: str | None = None
+        best_pid: int | None = None
 
         for j in tree.query(poly, predicate="intersects"):
             parent_poly, parent_area, pid = records[j]
@@ -64,9 +63,9 @@ def build_tree(
                 best_pid = pid
 
         if best_pid is not None:
-            graph.nodes[id].pid = best_pid
+            graph.nodes[id].pid = graph.nodes[best_pid].id
             graph.edges.append(SceneEdge(
-                graph.node[best_pid].id,
-                graph.node[id].id,
+                graph.nodes[best_pid].id,
+                graph.nodes[id].id,
                 "contains"
             ))

@@ -131,9 +131,13 @@ class SceneGraph:
     vlm_model_id: str = ""
     nodes: list[SceneNode] = field(default_factory=list)
     edges: list[SceneEdge] = field(default_factory=list)
+    _by_id: dict[str, SceneNode] = field(default_factory=dict, repr=False)
 
     def add_node(self, node: SceneNode) -> None:
+        if node.id in self._by_id:
+            raise ValueError(f"duplicate node id: {node.id!r}")
         self.nodes.append(node)
+        self._by_id[node.id] = node
 
     def add_edge(
         self,
@@ -149,10 +153,7 @@ class SceneGraph:
         ))
 
     def get_node(self, node_id: str) -> SceneNode | None:
-        for node in self.nodes:
-            if node.id == node_id:
-                return node
-        return None
+        return self._by_id.get(node_id)
 
     def site_node(self) -> SceneNode | None:
         for node in self.nodes:
@@ -170,13 +171,17 @@ class SceneGraph:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SceneGraph:
-        emb_model_id = data.get("emb_model_id") or data.get("embedding_model_id", "")
-        return cls(
-            emb_model_id=str(emb_model_id),
-            vlm_model_id=str(data.get("vlm_model_id") or ""),
-            nodes=[SceneNode.from_dict(n) for n in data.get("nodes", [])],
-            edges=[SceneEdge.from_dict(e) for e in data.get("edges", [])],
+        graph = cls(
+            emb_model_id=str(data.get("emb_model_id", "")),
+            vlm_model_id=str(data.get("vlm_model_id", "")),
         )
+        graph.nodes = [SceneNode.from_dict(n) for n in data.get("nodes", [])]
+        graph.edges = [SceneEdge.from_dict(e) for e in data.get("edges", [])]
+
+        for node in graph.nodes:
+            graph._by_id[node.id] = node
+        
+        return graph
 
     def to_json(self, path: Path | str) -> None:
         with Path(path).open("w", encoding="utf-8") as f:

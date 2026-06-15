@@ -9,9 +9,10 @@ from typing import Any
 import requests
 from PIL import Image, ImageDraw
 
+
+from herald.scene.common.progress import iter_progress
 from herald.scene.common.geometry import Frame
 from herald.scene.common.graph import SceneGraph, SceneNode
-from herald.scene.common.progress import iter_progress
 
 _STRONG_TAGS = frozenset(
     {
