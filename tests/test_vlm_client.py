@@ -1,63 +1,54 @@
-"""Tests for LangChain-backed VLM client."""
+"""Tests for VLMClient."""
 
 from unittest.mock import MagicMock
 
+import pytest
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from PIL import Image
+from pydantic import BaseModel, Field
 
-from services.vlm.client import classify_polygon
-from services.vlm.schema import (
-    Category,
-    EntityClassification,
-    Function,
-    Role,
-)
+from services.vlm import VLMClient, image_block, text_block
 
 
-def test_classify_polygon_uses_structured_invoke_with_dual_images():
-    mock_runnable = MagicMock()
-    mock_runnable.invoke.return_value = EntityClassification(
-        role=Role.structure,
-        category=Category.building,
-        function=Function.academic,
-        name="Hall",
-        desc="University building",
-        confidence=0.9,
-    )
-
-    aerial = Image.new("RGB", (64, 64), color=(120, 120, 120))
-    osm_map = Image.new("RGB", (64, 64), color=(200, 200, 200))
-    context = {"osm_id": 42, "tags": {"building": "university"}}
-
-    item = classify_polygon(
-        aerial,
-        osm_map,
-        context,
-        structured_model=mock_runnable,
-    )
-
-    assert item is not None
-    assert item.role.value == "structure"
-    mock_runnable.invoke.assert_called_once()
-    messages = mock_runnable.invoke.call_args.args[0]
-    assert messages[0].type == "system"
-    human = messages[1]
-    assert human.type == "human"
-    image_parts = [p for p in human.content if p.get("type") == "image_url"]
-    assert len(image_parts) == 2
+class _DemoOut(BaseModel):
+    label: str = Field(...)
+    score: float = Field(..., ge=0.0, le=1.0)
 
 
-def test_classify_polygon_returns_none_on_invoke_error():
-    mock_runnable = MagicMock()
-    mock_runnable.invoke.side_effect = RuntimeError("model down")
-    aerial = Image.new("RGB", (8, 8))
-    osm_map = Image.new("RGB", (8, 8))
-    assert (
-        classify_polygon(
-            aerial,
-            osm_map,
-            {"tags": {}},
-            structured_model=mock_runnable,
-        )
-        is None
-    )
+def test_invoke_structured_passes_messages_and_parses_model():
+    mock_structured = MagicMock()
+    mock_structured.invoke.return_value = _DemoOut(label="ok", score=0.8)
+    mock_chat = MagicMock()
+    mock_chat.with_structured_output.return_value = mock_structured
 
+    messages = [
+        SystemMessage(content="system"),
+        HumanMessage(content=[text_block("describe"), image_block(Image.new("RGB", (8, 8)))]),
+    ]
+    client = VLMClient("test", chat=mock_chat)
+    out = client.invoke(messages, schema=_DemoOut)
+
+    assert out.label == "ok"
+    mock_structured.invoke.assert_called_once_with(messages)
+    human = mock_structured.invoke.call_args.args[0][1]
+    assert human.content[1]["type"] == "image"
+
+
+def test_invoke_text_returns_message_text():
+    mock_chat = MagicMock()
+    mock_chat.invoke.return_value = AIMessage(content="hello")
+    client = VLMClient("test", chat=mock_chat)
+
+    assert client.invoke([SystemMessage(content="x")]) == "hello"
+    mock_chat.with_structured_output.assert_not_called()
+
+
+def test_invoke_structured_raises_on_invoke_error():
+    mock_structured = MagicMock()
+    mock_structured.invoke.side_effect = RuntimeError("down")
+    mock_chat = MagicMock()
+    mock_chat.with_structured_output.return_value = mock_structured
+    client = VLMClient("test", chat=mock_chat)
+
+    with pytest.raises(ValueError, match="structured output pipe"):
+        client.invoke([SystemMessage(content="x")], schema=_DemoOut)
