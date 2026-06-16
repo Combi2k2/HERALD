@@ -64,3 +64,13 @@ def context_tags(tags: dict[str, str]) -> dict[str, str]:
         for key, value in sorted(tags.items())
         if not is_metadata_key(key)
     }
+
+def osm_tags(node) -> dict[str, str]:
+    """OSM tag dict from a scene node's primary source ref."""
+    for ref in node.refs:
+        if ref.assigned_by == "osm":
+            raw = ref.metadata.get("tags")
+            if isinstance(raw, dict):
+                return dict(raw)
+    return {}
+

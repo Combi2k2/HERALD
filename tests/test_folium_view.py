@@ -1,12 +1,10 @@
 """Smoke tests for Rerun viewer integration."""
 
-import sys
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 
 from herald.scene.common.geometry import Frame
-from herald.scene.common._legacy_events import SceneEvent
 from herald.scene.common.geometry import Geometry, Vec3
 from herald.scene.common.graph import SceneGraph, SceneNode, SourceRef
 from herald.viewer.rerun_view import _closed_ring
@@ -17,7 +15,7 @@ def test_closed_ring_appends_first_vertex():
     assert _closed_ring(ring) == [(1.0, 2.0), (3.0, 4.0), (5.0, 6.0), (1.0, 2.0)]
 
 
-def test_publish_roi_event_without_rerun_import_at_module_level():
+def test_render_graph_without_rerun_import_at_module_level():
     frame = Frame.from_origin(48.71, 2.20)
     site_id = "site-uuid"
     site_ring = [
@@ -113,16 +111,6 @@ def test_publish_roi_event_without_rerun_import_at_module_level():
         from herald.viewer.rerun_view import RerunSceneViewer
 
         viewer = RerunSceneViewer(spawn=False)
-        viewer.set_frame(frame)
-        viewer.publish(
-            SceneEvent(
-                kind="roi_resolved",
-                payload={
-                    "centroid": {"lat": 48.71, "lon": 2.20},
-                    "vertices": site_ring,
-                },
-            )
-        )
         viewer.render_graph(graph, frame=frame)
     assert mock_rr.init.called
     assert mock_rr.LineStrips3D.called

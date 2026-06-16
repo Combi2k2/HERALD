@@ -96,15 +96,11 @@ def test_build_scene_graph_node_counts():
     )
     client = OSMClient(session=_MockSession())
     encoder = StubEncoder()
-    events: list[str] = []
     raw_polygons = [
         _raw_polygon(el)
         for el in SAMPLE_OVERPASS_RESPONSE["elements"]
         if el["tags"].get("building")
     ]
-
-    def on_event(ev):
-        events.append(ev.kind)
 
     result = build_scene_graph(
         roi,
@@ -112,7 +108,6 @@ def test_build_scene_graph_node_counts():
         frame=_frame_for(roi),
         client=client,
         encoder=encoder,
-        on_event=on_event,
         use_vlm=False,
         show_progress=False,
     )
@@ -129,7 +124,6 @@ def test_build_scene_graph_node_counts():
     assert all(n.refs for n in buildings)
     assert all(n.txt_embedding_ref is None for n in graph.nodes)
     assert all(n.role == "structure" for n in buildings)
-    assert "pipeline_complete" in events
     assert len(result.pathways) == 1
 
 

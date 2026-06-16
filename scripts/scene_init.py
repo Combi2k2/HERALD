@@ -14,7 +14,7 @@ from herald.data import RunPaths
 from herald.data.paths import FRAME_JSON
 from services.osm.client import OSMClient
 from services.osm.location import resolve_location
-from services.aerial.fetch import fetch_aerial_for_bbox, save_aerial
+from services.aerial import fetch_aerial_for_bbox, fetch_osm_for_meta, save_aerial
 from services.embeddings.encoder import StubEncoder
 from herald.scene.common.graph import SceneGraph
 from herald.scene.init import (
@@ -225,12 +225,10 @@ def main() -> None:
             raise SystemExit(1) from exc
 
     viewer = None
-    on_event = None
     if args.rerun:
         from herald.viewer.rerun_view import RerunSceneViewer
 
         viewer = RerunSceneViewer(spawn=True)
-        on_event = viewer.publish
 
     try:
         roi, used_picker = resolve_roi(
@@ -274,6 +272,7 @@ def main() -> None:
         overlay_server.set_status("Fetching aerial imagery…")
 
     aerial_image = None
+    osm_map_image = None
     aerial_meta = None
     aerial_saved = False
     if args.vlm and not args.no_aerial:
@@ -285,6 +284,7 @@ def main() -> None:
             save_aerial(image, meta, paths.aerial, paths.aerial_meta)
             aerial_image = image
             aerial_meta = meta
+            osm_map_image = fetch_osm_for_meta(meta, show_progress=show_progress)
             aerial_saved = True
             print(f"Saved aerial mosaic -> {paths.aerial}")
         except Exception as exc:
@@ -302,10 +302,6 @@ def main() -> None:
         flush=True,
     )
 
-    def checkpoint(partial_graph: SceneGraph) -> None:
-        partial_graph.to_json(paths.scene_graph)
-        save_annotations(paths.annotations, partial_graph)
-
     t0 = time.monotonic()
     build = build_scene_graph(
         roi,
@@ -314,9 +310,8 @@ def main() -> None:
         client=client,
         highways=raw_polygons.highways,
         encoder=encoder,
-        on_event=on_event,
-        on_checkpoint=checkpoint,
         aerial_image=aerial_image,
+        osm_map_image=osm_map_image,
         aerial_meta=aerial_meta,
         use_vlm=args.vlm,
         vlm_model=args.vlm_model,

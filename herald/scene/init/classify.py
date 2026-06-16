@@ -16,6 +16,7 @@ from herald.scene.common.progress import iter_progress
 from herald.scene.common.geometry import Frame
 from herald.scene.common.graph import SceneGraph, SceneNode
 from services.vlm import VLMClient, image_block, text_block
+from utils.osm_helpers import osm_tags
 
 
 class _Role(str, Enum):
@@ -98,20 +99,6 @@ Guidelines:
 - desc: one concise sentence, max 240 characters
 """
 
-
-def level_for_role(role: str) -> str:
-    if role in ("site", "structure"):
-        return role
-    return "region"
-
-
-def _tags(node: SceneNode) -> dict[str, str]:
-    for ref in node.refs:
-        if ref.assigned_by == "osm":
-            raw = ref.metadata.get("tags")
-            if isinstance(raw, dict):
-                return raw
-    return {}
 
 def _name(tags: dict[str, str]) -> str:
     return tags.get("name") or \
@@ -312,7 +299,7 @@ def build_feat(
             node.desc = f"site at ({frame.lat:.5f}, {frame.lon:.5f})"
             continue
 
-        tags = _tags(node)
+        tags = osm_tags(node)
         ctx: dict[str, Any] = {
             "area": round(float(node.refs[0].metadata.get("area", 0)), 1) if node.refs else 0,
             "tags": _ctx(tags),
@@ -328,6 +315,7 @@ def build_feat(
         else:
             item = _fallback(tags)
         node.role = item.role
+        node.type = "structure" if item.role == "structure" else "region"
         node.category = item.category
         node.function = item.function
         node.name = item.name

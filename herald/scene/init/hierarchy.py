@@ -50,15 +50,11 @@ def build_tree(
     for poly, area, id in records:
         best_area = float("inf")
         best_pid: int | None = None
-
         for j in tree.query(poly, predicate="intersects"):
             parent_poly, parent_area, pid = records[j]
             if pid == id or parent_area <= area:
                 continue
-            if (
-                parent_poly.intersection(poly).area >= containment_ratio * area
-                and parent_area < best_area
-            ):
+            if parent_poly.intersection(poly).area >= containment_ratio * area and parent_area < best_area:
                 best_area = parent_area
                 best_pid = pid
 

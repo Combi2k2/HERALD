@@ -14,13 +14,11 @@ from typing import Any
 from services.osm.client import OSMFeature, OSMRawPolygon
 from herald.scene.common.geometry import Frame
 import numpy as np
-from herald.scene.common._legacy_v2 import geom_from_v2
-from herald.scene.common._legacy_events import SceneEvent
 from herald.scene.common.geometry import Geometry
-from herald.scene.common.graph import SceneGraph, SceneNode, SourceRef
+from herald.scene.common.graph import SceneGraph, SceneNode
 from herald.viewer.hierarchy_layout import (
     GROUND_Z,
-    LAYER_HEIGHT,
+    LAYER_THICKNESS,
     SITE_ID,
     ancestor_layer_z,
     children_map_from_pairs,
@@ -238,20 +236,10 @@ class RerunSceneViewer:
             "pipeline/status",
             self._rr.TextLog(
                 "Ground map: osm/raw/* outlines. Upper layers: ancestor contours only "
-                f"({LAYER_HEIGHT:.0f} m per level). Select entities for attrs."
+                f"({LAYER_THICKNESS:.0f} m × max depth to leaf). Select entities for attrs."
             ),
             static=True,
         )
-
-    def publish(self, event: SceneEvent) -> None:
-        if event.kind == "roi_resolved":
-            self._log_roi(event)
-        elif event.kind == "pipeline_status":
-            self._log_status(event)
-        elif event.kind == "zone_node_created":
-            self._log_zone(event)
-        elif event.kind == "containment_inferred":
-            self._log_containment(event)
 
     def log_pathways(
         self, pathways: list[OSMFeature], *, static: bool = True
@@ -467,38 +455,6 @@ class RerunSceneViewer:
             for lat, lon in coords
         ]
 
-    def _node_from_event(self, event: SceneEvent) -> SceneNode | None:
-        if not event.node_id:
-            return None
-        payload = event.payload
-        if "geom" in payload:
-            node_geom = Geometry.from_dict(payload["geom"])
-        else:
-            legacy = payload.get("geometry_latlon")
-            if not legacy:
-                return None
-            ring = [(float(p[0]), float(p[1])) for p in legacy]
-            height = float(payload.get("height") or payload.get("height_m", 0.0))
-            node_geom = geom_from_v2(ring, height=height)
-        node_type = payload.get("type", "region")
-        if node_type == "outdoor_region":
-            node_type = "region"
-        elif node_type == "building":
-            node_type = "structure"
-        refs = [SourceRef.from_dict(r) for r in payload.get("refs", [])]
-        return SceneNode(
-            id=event.node_id,
-            type=node_type,
-            pid=payload.get("pid"),
-            geom=node_geom,
-            refs=refs,
-            name=str(payload.get("name") or ""),
-            desc=str(payload.get("desc") or payload.get("description") or ""),
-            role=str(payload.get("role") or ""),
-            category=str(payload.get("category") or ""),
-            function=str(payload.get("function") or ""),
-        )
-
     def _log_any_values(
         self, path: str, node: SceneNode, *, static: bool, **extra: Any
     ) -> None:
@@ -525,7 +481,7 @@ class RerunSceneViewer:
     def _log_legend(self, *, static: bool = True) -> None:
         lines = [
             "Ground (Z=0): OSM outline map under osm/raw/*.",
-            f"Upper layers: ancestor contours only, +{LAYER_HEIGHT:.0f} m per tree level.",
+            f"Upper layers: ancestor contours only, +{LAYER_THICKNESS:.0f} m per tree level.",
             "Select site/nodes/*/attrs or site/layers/*/attrs to inspect.",
             "",
         ]
@@ -556,45 +512,3 @@ class RerunSceneViewer:
             ),
             static=static,
         )
-
-    def _log_roi(self, event: SceneEvent) -> None:
-        if self._frame is None and "centroid" in event.payload:
-            from herald.scene.common.geometry import Frame
-
-            c = event.payload["centroid"]
-            self._frame = Frame.from_origin(c["lat"], c["lon"])
-        verts = event.payload.get("vertices", [])
-        if verts:
-            self._update_scene_span_latlon(
-                [(float(v[0]), float(v[1])) for v in verts]
-            )
-        self._send_blueprint()
-        self._log_legend(static=True)
-
-    def _log_status(self, event: SceneEvent) -> None:
-        message = event.payload.get("message", "")
-        if not message:
-            return
-        self._rr.log(
-            "pipeline/status",
-            self._rr.TextLog(message),
-            static=True,
-        )
-
-    def _log_zone(self, event: SceneEvent) -> None:
-        node = self._node_from_event(event)
-        if node is None:
-            return
-        self._node_store[node.id] = node
-
-    def _log_containment(self, event: SceneEvent) -> None:
-        if event.pid is None or event.node_id is None:
-            return
-        edge = (event.pid, event.node_id)
-        if edge not in self._containment_edges:
-            self._containment_edges.append(edge)
-        self._layout_cache.clear()
-        children_map = self._children_map()
-        affected = {event.pid, event.node_id}
-        affected |= self._ancestors_of(event.pid, children_map)
-        self._render_nodes(affected, children_map=children_map, static=True)
