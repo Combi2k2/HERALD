@@ -108,7 +108,6 @@ def _overlay_layers_payload(
     osm_polygons_geojson: dict,
     frame: Frame | None = None,
     graph: SceneGraph | None = None,
-    pathways_geojson: dict | None = None,
 ) -> dict:
     """Layer payload for the live Leaflet UI (`GET /overlay/layers.json`)."""
     lat, lon = roi.latlon_centroid()
@@ -233,40 +232,6 @@ def _overlay_layers_payload(
                 }
             )
 
-    if pathways_geojson is not None:
-        path_features = []
-        for feature in pathways_geojson.get("features", []):
-            geom = feature.get("geometry", {})
-            if geom.get("type") != "LineString":
-                continue
-            props = dict(feature.get("properties") or {})
-            props["popup"] = html.escape(
-                props.get("name") or props.get("highway") or "pathway"
-            )
-            path_features.append(
-                {
-                    "type": "Feature",
-                    "properties": props,
-                    "geometry": geom,
-                }
-            )
-        if path_features:
-            layers.append(
-                {
-                    "name": "Walkable pathways",
-                    "show": True,
-                    "style": {
-                        "color": "#ea580c",
-                        "weight": 3,
-                        "opacity": 0.9,
-                    },
-                    "geojson": {
-                        "type": "FeatureCollection",
-                        "features": path_features,
-                    },
-                }
-            )
-
     return {"center": {"lat": lat, "lon": lon}, "zoom": 16, "layers": layers}
 
 
@@ -294,7 +259,6 @@ def _write_overlay_map_html(
     osm_polygons_geojson: dict,
     frame: Frame | None = None,
     graph: SceneGraph | None = None,
-    pathways_geojson: dict | None = None,
 ) -> None:
     """Write a self-contained Folium HTML map with toggleable overlay layers."""
     import folium
@@ -305,7 +269,6 @@ def _write_overlay_map_html(
         osm_polygons_geojson=osm_polygons_geojson,
         frame=frame,
         graph=graph,
-        pathways_geojson=pathways_geojson,
     )
     center = payload["center"]
     m = folium.Map(
@@ -548,7 +511,6 @@ class SceneOverlayServer:
         frame: Frame,
         osm_polygons_geojson: dict,
         graph: SceneGraph,
-        pathways_geojson: dict,
     ) -> None:
         """Push overlay layer JSON derived from processed scene artifacts."""
         self._overlay_layers = _overlay_layers_payload(
@@ -556,8 +518,7 @@ class SceneOverlayServer:
             osm_polygons_geojson=osm_polygons_geojson,
             frame=frame,
             graph=graph,
-            pathways_geojson=pathways_geojson,
-        )
+            )
         self._overlay_ready = True
         self._status_message = "Layout ready — loading overlay…"
 

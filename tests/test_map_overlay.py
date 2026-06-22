@@ -71,7 +71,6 @@ def test_write_overlay_map_html_writes_file(tmp_path):
         frame=frame,
         osm_polygons_geojson=osm_geojson,
         graph=graph,
-        pathways_geojson={"type": "FeatureCollection", "features": []},
     )
     text = out_html.read_text(encoding="utf-8")
     assert "Hall A" in text or "building" in text

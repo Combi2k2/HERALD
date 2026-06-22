@@ -12,18 +12,11 @@ from pathlib import Path
 from herald.browser import suppress_gtk_atk_bridge_warning, open_browser as launch_browser
 from herald.data import RunPaths
 from herald.data.paths import FRAME_JSON
-from services.osm.client import OSMClient
-from services.osm.location import resolve_location
+from services.osm import OSMClient, resolve_location
 from services.aerial import fetch_aerial_for_bbox, fetch_osm_for_meta, save_aerial
 from services.embeddings.encoder import StubEncoder
 from herald.scene.common.graph import SceneGraph
-from herald.scene.init import (
-    BuildResult,
-    build_path,
-    build_scene_graph,
-    pathways_to_geojson,
-    save_annotations,
-)
+from herald.scene.init import build_scene_graph, save_annotations
 from herald.scene.common.geometry import Frame
 from herald.scene.common.roi import ROI
 from herald.ui import SceneOverlayServer
@@ -47,19 +40,18 @@ def save_raw_artifacts(
 
 def save_phase1_artifacts(
     paths: RunPaths,
-    build: BuildResult,
+    scene,
     roi: ROI,
-    pathways_geojson: dict,
     *,
     elapsed_s: float,
     osm_polygon_counts: dict[str, int] | None = None,
     osm_polygon_total: int | None = None,
 ) -> None:
-    graph = build.graph
+    graph = scene.graph
     site = graph.site_node()
     paths.phase1.mkdir(parents=True, exist_ok=True)
     graph.to_json(paths.scene_graph)
-    paths.pathways.write_text(json.dumps(pathways_geojson, indent=2), encoding="utf-8")
+    scene.nav.to_json(paths.nav_graph)
     save_annotations(paths.annotations, graph)
     outdoor = sum(1 for n in graph.nodes if n.type == "region")
     buildings = sum(1 for n in graph.nodes if n.type == "structure")
@@ -76,6 +68,8 @@ def save_phase1_artifacts(
             "buildings": buildings,
             "hierarchy_nodes": len(graph.nodes),
             "site_children": sum(1 for n in graph.nodes if n.pid == site.id) if site else 0,
+            "nav_nodes": len(scene.nav.nodes),
+            "nav_edges": len(scene.nav.edges),
         },
         "elapsed_s": round(elapsed_s, 2),
     }
@@ -150,7 +144,7 @@ def main() -> None:
     parser.add_argument(
         "--rerun",
         action="store_true",
-        help="Open Rerun viewer and stream graph construction",
+        help="Open Rerun viewer (toggle semantic / hierarchy / nav in entity tree)",
     )
     parser.add_argument(
         "--no-browser",
@@ -225,11 +219,9 @@ def main() -> None:
             print(f"Error: {exc}", file=sys.stderr)
             raise SystemExit(1) from exc
 
-    viewer = None
-    if args.rerun:
-        from herald.viewer.rerun_view import RerunSceneViewer
-
-        viewer = RerunSceneViewer(spawn=True)
+    use_rerun = args.rerun
+    if use_rerun:
+        from herald.ui import render_scene
 
     try:
         roi, used_picker = resolve_roi(
@@ -265,10 +257,6 @@ def main() -> None:
     raw_counts = raw_polygons.counts_by_tag()
     print(f"  OSM polygons: {len(raw_polygons.polygons)} ({raw_counts})")
 
-    if viewer is not None:
-        viewer.set_frame(frame)
-        viewer.render_raw_osm_polygons(raw_polygons.polygons)
-
     if overlay_server is not None:
         overlay_server.set_status("Fetching aerial imagery…")
 
@@ -299,12 +287,12 @@ def main() -> None:
     paths.phase1.mkdir(parents=True, exist_ok=True)
 
     print(
-        "Building scene graph (containment → pathways → classification → nodes)…",
+        "Building scene graph (containment → classification → nav)…",
         flush=True,
     )
 
     t0 = time.monotonic()
-    build = build_scene_graph(
+    scene = build_scene_graph(
         roi,
         raw_polygons.polygons,
         frame=frame,
@@ -318,10 +306,9 @@ def main() -> None:
         vlm_model=args.vlm_model,
         show_progress=show_progress,
     )
-    graph = build.graph
+    graph = scene.graph
     elapsed = time.monotonic() - t0
 
-    pathways_geojson = pathways_to_geojson(build.pathways)
     osm_polygons_geojson = raw_polygons.to_geojson()
 
     save_raw_artifacts(
@@ -332,17 +319,15 @@ def main() -> None:
     )
     save_phase1_artifacts(
         paths,
-        build,
+        scene,
         roi,
-        pathways_geojson,
         elapsed_s=elapsed,
         osm_polygon_counts=osm_polygons_geojson.get("properties", {}).get("counts"),
         osm_polygon_total=osm_polygons_geojson.get("properties", {}).get("total"),
     )
 
-    if viewer is not None:
-        viewer.log_pathways(build.pathways)
-        viewer.render_nav_graph(build_path(build.pathways, frame))
+    if use_rerun:
+        render_scene(scene, spawn=True)
 
     if not args.no_map:
         if overlay_server is not None:
@@ -353,7 +338,6 @@ def main() -> None:
             frame=frame,
             osm_polygons_geojson=osm_polygons_geojson,
             graph=graph,
-            pathways_geojson=pathways_geojson,
         )
         print(f"Saved map overlay -> {paths.map_overlay}")
         if overlay_server is not None:
@@ -362,7 +346,6 @@ def main() -> None:
                 frame=frame,
                 osm_polygons_geojson=osm_polygons_geojson,
                 graph=graph,
-                pathways_geojson=pathways_geojson,
             )
             if not used_picker and not args.no_browser:
                 launch_browser(f"{overlay_server.url}/")
