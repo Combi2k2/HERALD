@@ -1,12 +1,14 @@
 """Operator UI for ROI selection and map validation."""
 
 from herald.ui.map_overlay import SceneOverlayServer, build_map_overlay_ui
+from herald.ui.rerun import render_scene
 from herald.ui.roi_picker import ROIPickerError, _build_roi_picker_ui
 
 __all__ = [
     "ROIPickerError",
     "SceneOverlayServer",
     "build_scene_ui",
+    "render_scene",
 ]
 
 
