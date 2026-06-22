@@ -17,15 +17,15 @@ OSMElementType = Literal["node", "way", "relation"]
 OSMPrimaryTag = str  # display grouping key, e.g. "building", "shop", "untagged"
 
 DEFAULT_OVERPASS_URLS = (
-    "https://overpass.kumi.systems/api/interpreter",
     "https://lz4.overpass-api.de/api/interpreter",
     "https://overpass-api.de/api/interpreter",
 )
+CONNECT_TIMEOUT_S = 5.0
 DEFAULT_TIMEOUT_S = 30.0
-DEFAULT_RAW_POLYGON_TIMEOUT_S = 180.0
-RAW_POLYGON_OVERPASS_TIMEOUT_S = 180
-MAX_RETRIES_PER_URL = 3
-RETRY_BACKOFF_S = (2.0, 5.0, 10.0)
+DEFAULT_RAW_POLYGON_TIMEOUT_S = 90.0
+RAW_POLYGON_OVERPASS_TIMEOUT_S = 60
+MAX_RETRIES_PER_URL = 2
+RETRY_BACKOFF_S = (2.0, 5.0)
 RETRYABLE_HTTP_STATUS = frozenset({429, 502, 503, 504})
 MAX_POLYGON_VERTICES = 500
 
@@ -173,11 +173,15 @@ def _poly_coords_from_vertices(vertices_latlon: Sequence[tuple[float, float]]) -
 def _build_overpass_raw_polygons_query(vertices_latlon: Sequence[tuple[float, float]]) -> str:
     """Fetch every way/relation intersecting the ROI (no tag filter).
 
-    Polygon geometry is selected client-side only.
+    A single poly-bounded scan returns the complete set of features — including
+    untagged polygons that still matter to the scene schema. This is also the
+    *fastest* option: a per-tag union is slower because Overpass re-runs the
+    point-in-polygon test once per tag clause. Polygon-vs-line geometry is
+    selected client-side.
     """
     poly_coords = _poly_coords_from_vertices(vertices_latlon)
     return f"""
-[out:json][timeout:180];
+[out:json][timeout:{RAW_POLYGON_OVERPASS_TIMEOUT_S}];
 (
   way(poly:"{poly_coords}");
   relation(poly:"{poly_coords}");
@@ -293,12 +297,15 @@ def _parse_raw_polygon(element: dict[str, Any]) -> OSMRawPolygon | None:
 
 
 def _is_retryable_http_error(exc: BaseException) -> bool:
+    """Whether to retry the *same* endpoint.
+
+    Only transient server-busy HTTP statuses are worth retrying in place.
+    Timeouts and connection errors mean the endpoint is unhealthy, so the
+    caller fails over to the next endpoint immediately instead of waiting
+    through another full read timeout on a dead host.
+    """
     if isinstance(exc, requests.HTTPError) and exc.response is not None:
         return exc.response.status_code in RETRYABLE_HTTP_STATUS
-    if isinstance(exc, requests.Timeout):
-        return True
-    if isinstance(exc, requests.ConnectionError):
-        return True
     return False
 
 
@@ -337,7 +344,7 @@ class OSMClient:
                         url,
                         data=query.encode("utf-8"),
                         headers={"Content-Type": "text/plain; charset=utf-8"},
-                        timeout=read_timeout,
+                        timeout=(CONNECT_TIMEOUT_S, read_timeout),
                     )
                     response.raise_for_status()
                     return response.json()

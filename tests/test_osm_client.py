@@ -134,14 +134,20 @@ def test_query_raw_polygons_deduplicates():
     assert result.highways[0].tags["highway"] == "footway"
 
 
-def test_build_overpass_raw_polygons_query_has_no_tag_filter():
+def test_build_overpass_raw_polygons_query_is_unfiltered():
     verts = [(48.71, 2.20), (48.71, 2.21), (48.72, 2.21), (48.72, 2.20)]
-    from services.osm.client import _build_overpass_raw_polygons_query
+    from services.osm.client import (
+        RAW_POLYGON_OVERPASS_TIMEOUT_S,
+        _build_overpass_raw_polygons_query,
+    )
 
     query = _build_overpass_raw_polygons_query(verts)
+    # Unfiltered single poly scan: fetches all features (incl. untagged
+    # polygons) and is faster than a per-tag union.
     assert 'way(poly:"' in query
     assert 'relation(poly:"' in query
     assert 'way["building"]' not in query
+    assert f"[timeout:{RAW_POLYGON_OVERPASS_TIMEOUT_S}]" in query
 
 
 def test_build_overpass_polygon_query_contains_poly_clause():
@@ -167,8 +173,10 @@ def test_is_retryable_http_error():
     assert _is_retryable_http_error(requests.HTTPError(response=resp)) is True
     resp.status_code = 404
     assert _is_retryable_http_error(requests.HTTPError(response=resp)) is False
-    assert _is_retryable_http_error(requests.Timeout()) is True
-    assert _is_retryable_http_error(requests.ConnectionError()) is True
+    # Timeouts / connection errors fail over to the next endpoint rather than
+    # retrying the same (likely dead) host in place.
+    assert _is_retryable_http_error(requests.Timeout()) is False
+    assert _is_retryable_http_error(requests.ConnectionError()) is False
 
 
 def test_post_overpass_retries_504_then_succeeds(monkeypatch):

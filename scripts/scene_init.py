@@ -199,9 +199,9 @@ def main() -> None:
     parser.add_argument(
         "--overpass-timeout",
         type=float,
-        default=180.0,
+        default=90.0,
         metavar="SECONDS",
-        help="HTTP read timeout for Overpass queries (default: 180)",
+        help="HTTP read timeout for Overpass queries (default: 90)",
     )
     args = parser.parse_args()
 
