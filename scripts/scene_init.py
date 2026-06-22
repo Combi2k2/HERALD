@@ -19,6 +19,7 @@ from services.embeddings.encoder import StubEncoder
 from herald.scene.common.graph import SceneGraph
 from herald.scene.init import (
     BuildResult,
+    build_path,
     build_scene_graph,
     pathways_to_geojson,
     save_annotations,
@@ -341,6 +342,7 @@ def main() -> None:
 
     if viewer is not None:
         viewer.log_pathways(build.pathways)
+        viewer.render_nav_graph(build_path(build.pathways, frame))
 
     if not args.no_map:
         if overlay_server is not None:

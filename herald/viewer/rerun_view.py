@@ -16,6 +16,7 @@ from herald.scene.common.geometry import Frame
 import numpy as np
 from herald.scene.common.geometry import Geometry
 from herald.scene.common.graph import SceneGraph, SceneNode
+from herald.scene.common.nav import NavGraph
 from herald.viewer.hierarchy_layout import (
     GROUND_Z,
     LAYER_THICKNESS,
@@ -56,6 +57,13 @@ _RAW_DEFAULT_COLOR = [161, 161, 170]
 _LINE_WIDTH_RAW_PX = 1.0
 _LINE_WIDTH_CONTOUR_PX = 1.5
 _LINE_WIDTH_PATHWAY_PX = 1.25
+
+# Nav graph: nodes are volumetric spheres sized in scene metres (not pixels).
+_NAV_NODE_RADIUS = 2.0
+_NAV_NODE_Z = GROUND_Z
+_NAV_EDGE_Z = GROUND_Z + 0.1
+_COLOR_NAV_NODE = [250, 204, 21]
+_COLOR_NAV_EDGE = [234, 179, 8]
 
 _DISPLAY_TAG_ORDER = (
     "building",
@@ -245,6 +253,49 @@ class RerunSceneViewer:
         self, pathways: list[OSMFeature], *, static: bool = True
     ) -> None:
         self._log_pathways(pathways, static=static)
+
+    def render_nav_graph(self, nav: NavGraph, *, static: bool = True) -> None:
+        """Render nav-graph nodes as volumetric spheres and edges as lines.
+
+        Node positions are ENU metres; ``_NAV_NODE_RADIUS`` is in scene metres
+        so each node renders as a real 3D sphere rather than a screen-space dot.
+        """
+        if not nav.nodes:
+            return
+
+        positions = []
+        for node in nav.nodes:
+            east, north = node.pos
+            self._scene_span = max(self._scene_span, abs(east), abs(north), 1.0)
+            positions.append(_enu_to_rr(east, north, _NAV_NODE_Z))
+        self._rr.log(
+            "nav/nodes",
+            self._rr.Points3D(
+                positions,
+                colors=[[*_COLOR_NAV_NODE, 255]],
+                radii=_NAV_NODE_RADIUS,
+            ),
+            static=static,
+        )
+
+        pos_by_id = {node.id: node.pos for node in nav.nodes}
+        strips = []
+        for edge in nav.edges:
+            a, b = pos_by_id.get(edge.source_id), pos_by_id.get(edge.target_id)
+            if a is None or b is None:
+                continue
+            strips.append([_enu_to_rr(*a, _NAV_EDGE_Z), _enu_to_rr(*b, _NAV_EDGE_Z)])
+        if strips:
+            self._rr.log(
+                "nav/edges",
+                self._rr.LineStrips3D(
+                    strips,
+                    colors=[[*_COLOR_NAV_EDGE, 255]],
+                    radii=[self._line_width(_LINE_WIDTH_PATHWAY_PX)],
+                ),
+                static=static,
+            )
+        self._send_blueprint()
 
     def render_graph(
         self,

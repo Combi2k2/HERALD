@@ -1,4 +1,9 @@
-"""Navigation graph data model: routing over waypoints and portals."""
+"""Navigation graph data model: routing over waypoints and portals.
+
+Mirrors the :mod:`scene.common.graph` node interface (``id``/``type``/``refs``)
+but forms a graph rather than a tree, so there is no parent id. Node positions
+are ENU metres in the graph's :class:`Frame`.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +12,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-NavNodeKind = Literal["waypoint", "portal"]
+from herald.scene.common.geometry import Frame
+from herald.scene.common.graph import SourceRef
+
+NavNodeType = Literal["waypoint", "portal"]
 NavEdgeSource = Literal["osm", "trajectory"]
 
 
@@ -15,32 +23,25 @@ NavEdgeSource = Literal["osm", "trajectory"]
 class NavNode:
     id: str
     pos: tuple[float, float]
-    kind: NavNodeKind = "waypoint"
-    region_id: str | None = None
-    z: float | None = None
+    type: NavNodeType = "waypoint"
+    refs: list[SourceRef] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {
+        return {
             "id": self.id,
             "pos": [self.pos[0], self.pos[1]],
-            "kind": self.kind,
+            "type": self.type,
+            "refs": [ref.to_dict() for ref in self.refs],
         }
-        if self.region_id is not None:
-            payload["region_id"] = self.region_id
-        if self.z is not None:
-            payload["z"] = self.z
-        return payload
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> NavNode:
         pos = data["pos"]
-        z = data.get("z")
         return cls(
             id=data["id"],
             pos=(float(pos[0]), float(pos[1])),
-            kind=data.get("kind", "waypoint"),
-            region_id=data.get("region_id"),
-            z=float(z) if z is not None else None,
+            type=data.get("type", "waypoint"),
+            refs=[SourceRef.from_dict(r) for r in data.get("refs", [])],
         )
 
 
@@ -77,7 +78,7 @@ class NavEdge:
 
 @dataclass
 class NavGraph:
-    crs: str = "wgs84"
+    frame: Frame
     nodes: list[NavNode] = field(default_factory=list)
     edges: list[NavEdge] = field(default_factory=list)
 
@@ -111,7 +112,7 @@ class NavGraph:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "crs": self.crs,
+            "frame": self.frame.to_dict(),
             "nodes": [n.to_dict() for n in self.nodes],
             "edges": [e.to_dict() for e in self.edges],
         }
@@ -119,7 +120,7 @@ class NavGraph:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> NavGraph:
         return cls(
-            crs=data.get("crs", "wgs84"),
+            frame=Frame.from_dict(data["frame"]),
             nodes=[NavNode.from_dict(n) for n in data.get("nodes", [])],
             edges=[NavEdge.from_dict(e) for e in data.get("edges", [])],
         )
