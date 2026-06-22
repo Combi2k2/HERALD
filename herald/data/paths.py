@@ -11,6 +11,7 @@ RUN_ID = datetime.now().strftime(RUN_ID_FORMAT)
 RUN_ROOT = Path("data") / RUN_ID
 RAW_ROOT = RUN_ROOT / "raw"
 PHASE1_ROOT = RUN_ROOT / "phase1"
+REFINE_ROOT = RUN_ROOT / "refine"
 
 ROI_GEOJSON = "roi.geojson"
 OSM_GEOJSON = "osm.geojson"
@@ -24,6 +25,13 @@ PATHWAYS_GEOJSON = "pathways.geojson"
 ANNOTATIONS_JSON = "annotations.json"
 METADATA_JSON = "metadata.json"
 FRAME_JSON_NAME = "frame.json"
+
+# Phase 2 (refine) artifacts. The fused point cloud is render-only: it is stored
+# here as a sidecar and referenced by URI from REFINE_METADATA_JSON; it is never
+# embedded in the scene graph schema.
+POINT_CLOUD_PLY = "cloud.ply"
+REGISTRATION_JSON = "registration.json"
+REFINE_METADATA_JSON = "refine_metadata.json"
 
 SITE_DATA_ROOT = Path("data")
 FRAME_JSON = SITE_DATA_ROOT / FRAME_JSON_NAME
@@ -84,3 +92,23 @@ class RunPaths:
     @property
     def metadata(self) -> Path:
         return self.phase1 / METADATA_JSON
+
+    @property
+    def refine(self) -> Path:
+        return self.root / "refine"
+
+    @property
+    def refine_scene_graph(self) -> Path:
+        return self.refine / SCENE_GRAPH_JSON
+
+    @property
+    def point_cloud(self) -> Path:
+        return self.refine / POINT_CLOUD_PLY
+
+    @property
+    def registration(self) -> Path:
+        return self.refine / REGISTRATION_JSON
+
+    @property
+    def refine_metadata(self) -> Path:
+        return self.refine / REFINE_METADATA_JSON

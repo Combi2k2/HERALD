@@ -33,6 +33,21 @@ viz = [
 viewer = [
     "rerun-sdk>=0.20",
 ]
+# Phase-2 refinement: VGGT geometry brain + point-cloud/imaging deps. Heavy and
+# CUDA-bound, so kept OUT of default-groups — install explicitly:
+#   uv sync --group recon
+# VGGT ships from GitHub (no PyPI), hence the direct git reference.
+recon = [
+    "torch>=2.1",
+    "torchvision>=0.16",
+    "huggingface-hub>=0.20",
+    "safetensors>=0.4",
+    "einops>=0.7",
+    "opencv-python>=4.8",
+    "imageio>=2.31",
+    "open3d>=0.18",
+    "vggt @ git+https://github.com/facebookresearch/vggt.git",
+]
 
 [tool.uv]
 default-groups = ["dev", "viz", "vlm"]
