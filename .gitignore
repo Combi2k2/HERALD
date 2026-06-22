@@ -1,3 +1,7 @@
+# Generated datasets (re-run scripts/scene_init.py to recreate)
+data/*
+!data/.gitkeep
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
