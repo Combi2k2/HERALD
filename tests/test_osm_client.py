@@ -2,7 +2,7 @@
 
 import requests
 
-from services.osm.client import (
+from services.osm import (
     OSMClient,
     _build_overpass_polygon_query,
     _infer_geometry_kind,
@@ -136,7 +136,7 @@ def test_query_raw_polygons_deduplicates():
 
 def test_build_overpass_raw_polygons_query_is_unfiltered():
     verts = [(48.71, 2.20), (48.71, 2.21), (48.72, 2.21), (48.72, 2.20)]
-    from services.osm.client import (
+    from services.osm import (
         RAW_POLYGON_OVERPASS_TIMEOUT_S,
         _build_overpass_raw_polygons_query,
     )
@@ -196,7 +196,7 @@ def test_post_overpass_retries_504_then_succeeds(monkeypatch):
             return _MockResponse()
 
     sleeps: list[float] = []
-    monkeypatch.setattr("services.osm.client.time.sleep", lambda s: sleeps.append(s))
+    monkeypatch.setattr("services.osm.time.sleep", lambda s: sleeps.append(s))
 
     client = OSMClient(
         overpass_urls=("https://example.test/interpreter",),
@@ -219,7 +219,7 @@ def test_post_overpass_raises_after_all_retries(monkeypatch):
             resp.status_code = 504
             raise requests.HTTPError(response=resp)
 
-    monkeypatch.setattr("services.osm.client.time.sleep", lambda _s: None)
+    monkeypatch.setattr("services.osm.time.sleep", lambda _s: None)
 
     client = OSMClient(
         overpass_urls=("https://a.test/interpreter", "https://b.test/interpreter"),
