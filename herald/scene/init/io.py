@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from herald.scene.common.graph import SceneGraph
-from services.osm.client import OSMFeature, OSMRawPolygon
+from services.osm import OSMRawPolygon
 
 
 def annotations_from_graph(graph: SceneGraph) -> dict:
@@ -25,34 +25,6 @@ def annotations_from_graph(graph: SceneGraph) -> dict:
 
 def save_annotations(path: Path, graph: SceneGraph) -> None:
     path.write_text(json.dumps(annotations_from_graph(graph), indent=2), encoding="utf-8")
-
-
-def pathways_to_geojson(pathways: list[OSMFeature]) -> dict:
-    return {
-        "type": "FeatureCollection",
-        "features": [f.to_geojson_feature() for f in pathways],
-    }
-
-
-def pathways_from_geojson(data: dict) -> list[OSMFeature]:
-    features: list[OSMFeature] = []
-    for i, feat in enumerate(data.get("features", [])):
-        geom = feat.get("geometry", {})
-        if geom.get("type") != "LineString":
-            continue
-        coords = [(float(lat), float(lon)) for lon, lat in geom["coordinates"]]
-        props = {str(k): str(v) for k, v in (feat.get("properties") or {}).items()}
-        features.append(
-            OSMFeature(
-                osm_id=int(props.get("osm_id", i)),
-                osm_type="way",
-                tags=props,
-                geometry=tuple(coords),
-                kind="linestring",
-                category="highway",
-            )
-        )
-    return features
 
 
 def raw_polygons_from_geojson(data: dict) -> list[OSMRawPolygon]:

@@ -2,7 +2,7 @@
 
 Mirrors the :mod:`scene.common.graph` node interface (``id``/``type``/``refs``)
 but forms a graph rather than a tree, so there is no parent id. Node positions
-are ENU metres in the graph's :class:`Frame`.
+are ENU metres in the site :class:`~herald.scene.common.repr.SceneRepr` frame.
 """
 
 from __future__ import annotations
@@ -12,7 +12,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from herald.scene.common.geometry import Frame
 from herald.scene.common.graph import SourceRef
 
 NavNodeType = Literal["waypoint", "portal"]
@@ -78,7 +77,6 @@ class NavEdge:
 
 @dataclass
 class NavGraph:
-    frame: Frame
     nodes: list[NavNode] = field(default_factory=list)
     edges: list[NavEdge] = field(default_factory=list)
 
@@ -112,7 +110,6 @@ class NavGraph:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "frame": self.frame.to_dict(),
             "nodes": [n.to_dict() for n in self.nodes],
             "edges": [e.to_dict() for e in self.edges],
         }
@@ -120,7 +117,6 @@ class NavGraph:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> NavGraph:
         return cls(
-            frame=Frame.from_dict(data["frame"]),
             nodes=[NavNode.from_dict(n) for n in data.get("nodes", [])],
             edges=[NavEdge.from_dict(e) for e in data.get("edges", [])],
         )

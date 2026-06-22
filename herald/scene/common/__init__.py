@@ -5,12 +5,14 @@ from herald.scene.common.geometry import Frame, Geometry, Vec2, Vec3, Vec4
 from herald.scene.common.graph import SceneGraph, SceneNode
 from herald.scene.common.nav import NavEdge, NavGraph, NavNode
 from herald.scene.common.trajectory import Pose, Trajectory
+from herald.scene.common.repr import SceneRepr
 from herald.scene.common.roi import ROI
 
 __all__ = [
     "Frame",
     "Geometry",
     "ROI",
+    "SceneRepr",
     "NavEdge",
     "NavGraph",
     "NavNode",

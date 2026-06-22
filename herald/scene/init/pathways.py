@@ -1,4 +1,4 @@
-"""Walkable OSM highway filtering and navigation graph construction."""
+"""Navigation graph construction from OSM highway linestrings."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from herald.scene.common.geometry import Frame
 from herald.scene.common.graph import SourceRef
 from herald.scene.common.nav import NavGraph, NavNode
-from services.osm.client import OSMFeature
+from services.osm import OSMFeature
 
 WALKABLE_HIGHWAY_TYPES = frozenset(
     {"footway", "path", "pedestrian", "steps", "cycleway", "living_street"}
@@ -32,11 +32,6 @@ def _is_walkable(feature: OSMFeature) -> bool:
         feature.kind == "linestring"
         and feature.tags.get("highway") in WALKABLE_HIGHWAY_TYPES
     )
-
-
-def filter_walkable_highways(highways: list[OSMFeature]) -> list[OSMFeature]:
-    """Keep linestring highways suitable for pedestrian routing."""
-    return [h for h in highways if _is_walkable(h)]
 
 
 def _densify_polyline(
@@ -120,13 +115,12 @@ def build_path(
     Each node records the OSM way(s) that pass through it in ``refs``. Node
     positions are ENU metres in ``frame``.
     """
+    walkable = [h for h in highways if _is_walkable(h)]
     grid = _SnapGrid(config.snap_radius)
     edges: set[tuple[int, int]] = set()
     node_refs: dict[int, set[str]] = {}
 
-    for feature in highways:
-        if not _is_walkable(feature):
-            continue
+    for feature in walkable:
         ref = f"{feature.osm_type}/{feature.osm_id}"
         enu = [frame.wgs2enu(lat, lon) for lat, lon in feature.geometry]
         ids = [grid.representative(x, y) for x, y in _densify_polyline(enu, config.edge_length)]
@@ -136,7 +130,7 @@ def build_path(
             if a != b:
                 edges.add((a, b) if a < b else (b, a))
 
-    graph = NavGraph(frame=frame)
+    graph = NavGraph()
     for index, pos in enumerate(grid.positions):
         refs = [SourceRef(assigned_by="osm", assigned_id=r) for r in sorted(node_refs.get(index, ()))]
         graph.add_node(NavNode(id=_node_id(index), pos=pos, refs=refs))

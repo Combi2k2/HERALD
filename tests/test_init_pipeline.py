@@ -1,6 +1,6 @@
 """End-to-end tests for scene graph initialization pipeline."""
 
-from services.osm.client import OSMClient, OSMRawPolygon
+from services.osm import OSMClient, OSMRawPolygon
 from services.embeddings.encoder import StubEncoder
 from herald.scene.common.geometry import Frame
 from herald.scene.init import build_scene_graph
@@ -111,12 +111,13 @@ def test_build_scene_graph_node_counts():
         use_vlm=False,
         show_progress=False,
     )
-    graph = result.graph
+    scene = result
+    graph = scene.graph
     site = graph.site_node()
 
     assert site is not None
-    assert result.graph.emb_model_id == "stub-v0"
-    assert result.graph.vlm_model_id == "ollama:qwen2.5vl:3b"
+    assert scene.graph.emb_model_id == "stub-v0"
+    assert scene.graph.vlm_model_id == "ollama:qwen2.5vl:3b"
     assert len(graph.nodes) == 3
     buildings = [n for n in graph.nodes if n.type == "structure"]
     assert len(buildings) == 2
@@ -124,7 +125,8 @@ def test_build_scene_graph_node_counts():
     assert all(n.refs for n in buildings)
     assert all(n.txt_embedding_ref is None for n in graph.nodes)
     assert all(n.role == "structure" for n in buildings)
-    assert len(result.pathways) == 1
+    assert len(scene.nav.nodes) >= 2
+    assert len(scene.nav.edges) >= 1
 
 
 def test_build_scene_graph_containment_edges():
@@ -146,7 +148,8 @@ def test_build_scene_graph_containment_edges():
         use_vlm=False,
         show_progress=False,
     )
-    graph = result.graph
+    scene = result
+    graph = scene.graph
     site = graph.site_node()
     assert site is not None
     contains = [e for e in graph.edges if e.edge_type == "contains"]

@@ -19,6 +19,7 @@ AERIAL_PNG = "aerial.png"
 AERIAL_META_JSON = "aerial_meta.json"
 
 SCENE_GRAPH_JSON = "scene_graph.json"
+NAV_GRAPH_JSON = "nav_graph.json"
 PATHWAYS_GEOJSON = "pathways.geojson"
 ANNOTATIONS_JSON = "annotations.json"
 METADATA_JSON = "metadata.json"
@@ -67,6 +68,10 @@ class RunPaths:
     @property
     def scene_graph(self) -> Path:
         return self.phase1 / SCENE_GRAPH_JSON
+
+    @property
+    def nav_graph(self) -> Path:
+        return self.phase1 / NAV_GRAPH_JSON
 
     @property
     def pathways(self) -> Path:

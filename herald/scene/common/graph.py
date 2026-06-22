@@ -1,9 +1,9 @@
 """Scene graph data model for offline initialization.
 
 The scene graph stores topology, captions, and embedding references for the global
-planner. Site frame and ROI are site-level artifacts stored separately from
-``scene_graph.json``. Model ids on the graph header record which embedding and
-VLM models produced the run.
+planner. The site :class:`~herald.scene.common.repr.SceneRepr` bundles the shared
+:class:`Frame` with the semantic graph and navigation graph. Model ids on the graph
+header record which embedding and VLM models produced the run.
 """
 
 from __future__ import annotations

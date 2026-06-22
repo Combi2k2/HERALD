@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import numpy as np
 from PIL import Image
 from shapely.geometry import Polygon
@@ -11,25 +9,22 @@ from shapely.geometry import Polygon
 from herald.scene.common.geometry import Frame, Geometry
 from herald.scene.common.graph import SceneGraph, SceneNode, SourceRef
 from herald.scene.common.progress import iter_progress
+from herald.scene.common.repr import SceneRepr
 from herald.scene.common.roi import ROI
+
+from herald.scene.init.hierarchy import build_tree, MAX_NODE_AREA, MIN_NODE_AREA
 from herald.scene.init.classify import build_feat
-from herald.scene.init.hierarchy import MAX_NODE_AREA, MIN_NODE_AREA, build_tree
-from herald.scene.init.pathways import filter_walkable_highways
+from herald.scene.init.pathways import build_path
+
 from services.aerial import AerialMeta
 from services.embeddings.encoder import Encoder, StubEncoder
-from services.osm.client import OSMClient, OSMFeature, OSMRawPolygon
+from services.osm import OSMClient, OSMFeature, OSMRawPolygon
 from services.vlm import VLMClient
+
 from utils.osm_filter import polygon_disposition
 from utils.osm_helpers import context_tags, osm_tags
 
 SITE_NODE_ID = "site_000"
-
-
-@dataclass
-class BuildResult:
-    graph: SceneGraph
-    frame: Frame
-    pathways: list[OSMFeature]
 
 
 def _wgs_ring(coords) -> list[list[float]]:
@@ -64,7 +59,12 @@ def seed_graph(
         if len(ring) < 4:
             continue
         area = float(Polygon([frame.wgs2utm(p[0], p[1]) for p in ring]).area)
-        if polygon_disposition(poly.tags, area=area, min_area=MIN_NODE_AREA, max_area=MAX_NODE_AREA) != "hierarchy":
+        if polygon_disposition(
+            poly.tags,
+            area=area,
+            min_area=MIN_NODE_AREA,
+            max_area=MAX_NODE_AREA,
+        ) != "hierarchy":
             continue
         graph.add_node(
             SceneNode(
@@ -98,7 +98,7 @@ def build_scene_graph(
     use_vlm: bool = False,
     vlm_model: str = "ollama:qwen2.5vl:3b",
     show_progress: bool = True,
-) -> BuildResult:
+) -> SceneRepr:
     enc = encoder or StubEncoder()
     osm = client or OSMClient()
 
@@ -113,12 +113,6 @@ def build_scene_graph(
     print("  Computing containment hierarchy…", flush=True)
     build_tree(graph, frame)
     print(f"  Hierarchy: {len(graph.nodes)} nodes", flush=True)
-
-    print("  Extracting walkable pathways…", flush=True)
-    if highways is None:
-        highways = osm.query_in_polygon(roi.latlon_vertices()).highways
-    pathways = filter_walkable_highways(highways)
-    print(f"  Pathways: {len(pathways)} walkable segments", flush=True)
 
     mode = "VLM classifying" if use_vlm else "Classifying"
     print(f"  {mode} {len(graph.nodes) - 1} polygon(s)…", flush=True)
@@ -149,4 +143,13 @@ def build_scene_graph(
             frame="ENU",
         )
 
-    return BuildResult(graph=graph, frame=frame, pathways=pathways)
+    print("  Building navigation graph…", flush=True)
+    if highways is None:
+        highways = osm.query_in_polygon(roi.latlon_vertices()).highways
+    nav = build_path(highways, frame)
+    print(
+        f"  Nav graph: {len(nav.nodes)} nodes, {len(nav.edges)} edges",
+        flush=True,
+    )
+
+    return SceneRepr(frame=frame, graph=graph, nav=nav)
