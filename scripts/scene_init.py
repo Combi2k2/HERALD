@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-"""Build offline scene graph from ROI and save artifacts."""
-
 from __future__ import annotations
 
 import argparse
@@ -15,14 +13,12 @@ from herald.data.paths import FRAME_JSON
 from services.osm import OSMClient, resolve_location
 from services.aerial import fetch_aerial_for_bbox, fetch_osm_for_meta, save_aerial
 from services.embeddings.encoder import StubEncoder
-from herald.scene.common.graph import SceneGraph
 from herald.scene.init import build_scene_graph, save_annotations
 from herald.scene.common.geometry import Frame
 from herald.scene.common.roi import ROI
 from herald.ui import SceneOverlayServer
 from herald.ui.map_overlay import _write_overlay_map_html
 from herald.ui.roi_picker import ROIPickerError
-
 
 def save_raw_artifacts(
     paths: RunPaths,
@@ -36,7 +32,6 @@ def save_raw_artifacts(
     paths.osm.write_text(json.dumps(osm_polygons_geojson, indent=2), encoding="utf-8")
     if not aerial_saved:
         return
-
 
 def save_phase1_artifacts(
     paths: RunPaths,
@@ -79,9 +74,7 @@ def save_phase1_artifacts(
         meta["osm_polygon_total"] = osm_polygon_total
     paths.metadata.write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
-
 def _map_center_fallback(args: argparse.Namespace) -> tuple[float, float] | None:
-    """Optional fallback map center if browser geolocation is unavailable."""
     if args.center is not None:
         parts = [p.strip() for p in args.center.split(",")]
         if len(parts) != 2:
@@ -93,13 +86,11 @@ def _map_center_fallback(args: argparse.Namespace) -> tuple[float, float] | None
     except ValueError:
         return None
 
-
 def resolve_roi(
     args: argparse.Namespace,
     *,
     overlay_server: SceneOverlayServer | None = None,
 ) -> tuple[ROI, bool]:
-    """Return (roi, used_picker)."""
     if args.roi is not None:
         return ROI.from_geojson(args.roi), False
     if args.bbox is not None:
@@ -128,7 +119,6 @@ def resolve_roi(
         ),
         True,
     )
-
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -359,7 +349,6 @@ def main() -> None:
     print(f"Nodes: {len(graph.nodes)}, edges: {len(graph.edges)}")
     print(f"Saved run -> {paths.root}")
     print(f"Elapsed: {elapsed:.1f}s")
-
 
 if __name__ == "__main__":
     main()

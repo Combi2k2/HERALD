@@ -220,3 +220,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Model weights (downloaded, multi-GB)
+checkpoints/

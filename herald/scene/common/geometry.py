@@ -209,3 +209,51 @@ class FrameGeometry:
     @property
     def cam_center(self) -> np.ndarray:
         return self.c2w[:3, 3].astype(np.float64)
+
+
+@dataclass
+class Sim3:
+    """Similarity transform g = s·R·l + t between two metric frames.
+
+    Used to chain per-window reconstructions into one frame today; intended to
+    become the per-window optimization variable for bundle adjustment later.
+    """
+
+    s: float = 1.0
+    R: np.ndarray = field(default_factory=lambda: np.eye(3))
+    t: np.ndarray = field(default_factory=lambda: np.zeros(3))
+
+    def __post_init__(self) -> None:
+        self.s = float(self.s)
+        self.R = np.asarray(self.R, dtype=np.float64).reshape(3, 3)
+        self.t = np.asarray(self.t, dtype=np.float64).reshape(3)
+
+    @classmethod
+    def from_poses(cls, g_c2w: np.ndarray, l_c2w: np.ndarray) -> Sim3:
+        """Estimate the Sim3 mapping local camera poses onto global ones."""
+        g_c2w = np.asarray(g_c2w, dtype=np.float64)
+        l_c2w = np.asarray(l_c2w, dtype=np.float64)
+        gc, lc = g_c2w[:, :3, 3], l_c2w[:, :3, 3]
+        iu = np.triu_indices(len(gc), 1)
+        dg = np.linalg.norm(gc[None] - gc[:, None], axis=-1)[iu]
+        dl = np.linalg.norm(lc[None] - lc[:, None], axis=-1)[iu]
+        ok = dl > 1e-9
+        s = float(np.median(dg[ok] / dl[ok])) if ok.any() else 1.0
+        m = np.einsum("nij,nkj->ik", g_c2w[:, :3, :3], l_c2w[:, :3, :3])
+        u, _, vt = np.linalg.svd(m)
+        if np.linalg.det(u @ vt) < 0:
+            u[:, -1] *= -1
+        r = u @ vt
+        t = gc.mean(axis=0) - s * r @ lc.mean(axis=0)
+        return cls(s, r, t)
+
+    def apply(self, points: np.ndarray) -> np.ndarray:
+        """Transform (N, 3) points."""
+        return self.s * np.asarray(points, dtype=np.float64) @ self.R.T + self.t
+
+    def apply_pose(self, c2w: np.ndarray) -> np.ndarray:
+        """Transform (..., 4, 4) camera-to-world poses."""
+        out = np.asarray(c2w, dtype=np.float64).copy()
+        out[..., :3, :3] = self.R @ out[..., :3, :3]
+        out[..., :3, 3] = self.s * out[..., :3, 3] @ self.R.T + self.t
+        return out

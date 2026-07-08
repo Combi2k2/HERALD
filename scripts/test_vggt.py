@@ -21,7 +21,9 @@ def main() -> None:
     p.add_argument("--image-resolution", type=int, default=512, help="Must be divisible by 16 (VGGT-Omega patch size)")
     p.add_argument("--device", default="cuda")
     p.add_argument("--stride", type=int, default=1)
-    p.add_argument("--max-frames", type=int, default=32, help="VGGT runs one batch over all frames")
+    p.add_argument("--max-frames", type=int, default=32, help="0=all frames (processed chunk by chunk)")
+    p.add_argument("--chunk", type=int, default=32, help="Frames per VGGT forward pass")
+    p.add_argument("--overlap", type=int, default=4, help="Shared frames used to Sim3-align consecutive chunks")
     p.add_argument("--pixel-stride", type=int, default=4)
     p.add_argument("--max-depth", type=float, default=0.0, help="Clip depth (0=off; VGGT depth is up-to-scale)")
     p.add_argument("--conf-thresh", type=float, default=0.0, help="Min depth confidence (0=off)")
@@ -40,9 +42,12 @@ def main() -> None:
 
     from herald.scene.recon import vggt
 
-    print(f"vggt: inferring geometry for {len(paths)} frames", flush=True)
-    model = vggt.load_model(str(args.checkpoint), args.device)
-    geo = vggt.vggt_infer(paths, args.image_resolution, model)
+    print(f"vggt: inferring geometry for {len(paths)} frames "
+          f"(chunk={args.chunk}, overlap={args.overlap})", flush=True)
+    stream = vggt.VggtStream(str(args.checkpoint), device=args.device,
+                             chunk=args.chunk, overlap=args.overlap,
+                             image_resolution=args.image_resolution)
+    geo = stream.run_video(paths)
     s, h, w = geo["depth"].shape
     print(f"  depth {s}x{h}x{w}", flush=True)
 
