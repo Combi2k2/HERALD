@@ -1,4 +1,4 @@
-"""Vector primitives, site coordinate frame, and scene geometry."""
+"""Vector primitives, site coordinate frame, scene geometry, and camera frame geometry."""
 
 from __future__ import annotations
 
@@ -178,3 +178,34 @@ class Geometry:
             coords=np.array(coords, dtype=np.float64),
             offset=Vec3(data.get("offset", [0.0, 0.0, 0.0])),
         )
+
+
+@dataclass
+class FrameGeometry:
+    """Per-frame pinhole geometry: intrinsics, camera-to-world pose, and depth."""
+
+    index: int
+    K: np.ndarray
+    c2w: np.ndarray
+    depth: np.ndarray
+    conf: np.ndarray | None = None
+    rgb_ref: str | None = None
+
+    def __post_init__(self) -> None:
+        self.K = np.asarray(self.K, dtype=np.float64).reshape(3, 3)
+        self.c2w = np.asarray(self.c2w, dtype=np.float64).reshape(4, 4)
+        self.depth = np.asarray(self.depth, dtype=np.float32)
+        if self.depth.ndim != 2:
+            raise ValueError(f"depth must be (H, W), got {self.depth.shape}")
+        if self.conf is not None:
+            self.conf = np.asarray(self.conf, dtype=np.float32)
+            if self.conf.shape != self.depth.shape:
+                raise ValueError("conf must match depth shape")
+
+    @property
+    def hw(self) -> tuple[int, int]:
+        return (int(self.depth.shape[0]), int(self.depth.shape[1]))
+
+    @property
+    def cam_center(self) -> np.ndarray:
+        return self.c2w[:3, 3].astype(np.float64)
