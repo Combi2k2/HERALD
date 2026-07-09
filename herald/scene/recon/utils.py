@@ -98,23 +98,29 @@ def unproject_labeled(
     world = cam @ c2w[:3, :3].T + c2w[:3, 3]
     return world, lab[ok].astype(np.int64)
 
-def filter_clusters(points: np.ndarray, *, eps: float, min_cluster: int) -> np.ndarray:
-    """Keep-mask for points in connected clusters of at least min_cluster points."""
+def filter_clusters(
+    points: np.ndarray, *, eps: float, min_cluster: int, min_samples: int = 1
+) -> np.ndarray:
+    """Keep-mask for points in DBSCAN clusters of at least min_cluster points.
+
+    min_samples=1 makes every point a core point, so DBSCAN reduces to plain
+    eps-connectivity (no noise); raise it to also break low-density bridges
+    and drop sparse points as noise.
+    """
     n = len(points)
     if n == 0:
         return np.zeros(0, dtype=bool)
-    if min_cluster <= 1:
+    if min_cluster <= 1 and min_samples <= 1:
         return np.ones(n, dtype=bool)
 
-    from scipy.sparse import coo_matrix
-    from scipy.sparse.csgraph import connected_components
-    from scipy.spatial import cKDTree
+    from sklearn.cluster import DBSCAN
 
-    pairs = cKDTree(points).query_pairs(eps, output_type="ndarray")
-    graph = coo_matrix((np.ones(len(pairs)), (pairs[:, 0], pairs[:, 1])), shape=(n, n))
-    _, comp = connected_components(graph, directed=False)
-    sizes = np.bincount(comp)
-    return sizes[comp] >= min_cluster
+    comp = DBSCAN(eps=eps, min_samples=min_samples).fit_predict(points)
+    keep = comp >= 0  # DBSCAN marks noise as -1
+    if keep.any():
+        sizes = np.bincount(comp[keep])
+        keep[keep] = sizes[comp[keep]] >= min_cluster
+    return keep
 
 def save_cloud(cloud: dict, path: Path | str) -> None:
     path = Path(path)

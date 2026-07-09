@@ -7,13 +7,13 @@ gives per-frame label maps, and fusion.Fuser votes both into a labeled cloud.
 Both streams expose run_chunk / run_video / run_stream plus the incremental
 push/finish interface.
 
-vggt is not re-exported here: importing it pulls in torch + vggt_omega, which
-fusion-only users should not pay for. Import it directly as
+vggt is not re-exported here (importing it pulls in torch + vggt_omega) and
+Sam2Stream is re-exported lazily (sam2 pulls in torch + transformers), so
+fusion-only users pay for neither. Import vggt directly as
 herald.scene.recon.vggt.
 """
 
 from herald.scene.recon.fusion import Fuser
-from herald.scene.recon.sam2 import Sam2Stream
 from herald.scene.recon.utils import (
     erode_labels,
     filter_clusters,
@@ -33,3 +33,10 @@ __all__ = [
     "unproject_labeled",
     "write_ply",
 ]
+
+def __getattr__(name: str):
+    if name == "Sam2Stream":
+        from herald.scene.recon.sam2 import Sam2Stream
+
+        return Sam2Stream
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

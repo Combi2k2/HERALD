@@ -13,7 +13,7 @@ Low-confidence input is discarded before it can vote:
   percentile (VGGT conf has no absolute scale, so the threshold is relative);
 - mask borders: label maps are eroded so points cannot bleed across objects;
 - voxels/objects: finalize() drops voxels with few hits, labels seen in few
-  frames, and small disconnected clusters (utils.filter_clusters).
+  frames, and small or low-density DBSCAN clusters (utils.filter_clusters).
 
 The result is a dict of flat arrays — {"points": (N,3) f32, "labels": (N,) i64,
 "hits": (N,) i64, "obj_labels"/"obj_frames": per-object i64, "frame": int} —
@@ -43,7 +43,7 @@ class Fuser:
         voxel: float = 0.1,
         stride: int = 2,
         max_depth: float = 60.0,
-        conf_percentile: float = 0.0,
+        conf_pct: float = 0.0,
         edge_rtol: float = 0.0,
         erode: int = 1,
         ignore_ids: Sequence[int] = (),
@@ -53,7 +53,7 @@ class Fuser:
         self.voxel = voxel
         self.stride = max(1, stride)
         self.max_depth = max_depth
-        self.conf_percentile = conf_percentile
+        self.conf_pct = conf_pct
         self.edge_rtol = edge_rtol
         self.erode = max(0, erode)
         self.ignore_ids = frozenset(int(i) for i in ignore_ids)
@@ -78,9 +78,9 @@ class Fuser:
         if self.edge_rtol > 0:
             valid &= ~depth_edge(depth, rtol=self.edge_rtol)
         conf = get("conf")
-        if conf is not None and self.conf_percentile > 0 and np.any(valid):
+        if conf is not None and self.conf_pct > 0 and np.any(valid):
             conf = np.asarray(conf)
-            valid &= conf >= np.percentile(conf[valid], self.conf_percentile)
+            valid &= conf >= np.percentile(conf[valid], self.conf_pct)
 
         points, point_labels = unproject_labeled(
             depth, get("K"), get("c2w"), lab, stride=self.stride, valid=valid)
@@ -109,6 +109,7 @@ class Fuser:
         *,
         eps: float | None = None,
         min_cluster: int = 10,
+        min_samples: int = 1,
         min_hits: int = 1,
         min_frames: int = 1,
         frame: int = -1,
@@ -133,7 +134,8 @@ class Fuser:
             keep = cnt >= min_hits
             points, cnt = points[keep], cnt[keep]
             if len(points) and eps > 0:
-                keep = filter_clusters(points, eps=eps, min_cluster=min_cluster)
+                keep = filter_clusters(
+                    points, eps=eps, min_cluster=min_cluster, min_samples=min_samples)
                 points, cnt = points[keep], cnt[keep]
             if len(points) == 0:
                 continue
