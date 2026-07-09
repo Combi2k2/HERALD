@@ -2,17 +2,18 @@
 
 Geometry can be a per-frame dict from VggtStream ({"K","c2w","depth","conf"})
 or a dataset FrameGeometry (TartanGround GT); labels can come from Sam2Stream
-or dataset GT seg, and sources may be mixed frame to frame. Every accepted
-pixel casts a (voxel, label) vote and finalize() resolves each voxel by
-majority, so disagreeing sources and per-frame mask noise are reconciled
-instead of trusted blindly.
+or dataset GT seg, and sources may be mixed frame to frame. push() feeds one
+frame; every accepted pixel casts a (voxel, label) vote and flush() resolves
+each voxel by majority, so disagreeing sources and per-frame mask noise are
+reconciled instead of trusted blindly. flush() is non-destructive — call it
+repeatedly between pushes to snapshot the cloud as the scene builds up.
 
 Low-confidence input is discarded before it can vote:
 - pixels: non-finite/zero/far depth, depth discontinuities (utils.depth_edge,
   the "flying pixel" filter from vggt-omega), and a per-frame confidence
   percentile (VGGT conf has no absolute scale, so the threshold is relative);
 - mask borders: label maps are eroded so points cannot bleed across objects;
-- voxels/objects: finalize() drops voxels with few hits, labels seen in few
+- voxels/objects: flush() drops voxels with few hits, labels seen in few
   frames, and small or low-density DBSCAN clusters (utils.filter_clusters).
 
 The result is a dict of flat arrays — {"points": (N,3) f32, "labels": (N,) i64,
@@ -64,8 +65,8 @@ class Fuser:
         self._label_frames: dict[int, int] = {}
         self.frames = 0
 
-    def add(self, geo, labels) -> None:
-        """Fuse one frame; `geo` is a VggtStream dict or a FrameGeometry."""
+    def push(self, geo, labels) -> None:
+        """Fuse one frame into the accumulator; `geo` is a VggtStream dict or a FrameGeometry."""
         get = geo.get if isinstance(geo, Mapping) else lambda k: getattr(geo, k, None)
         depth = np.asarray(get("depth"))
         lab = np.asarray(labels)
@@ -104,7 +105,7 @@ class Fuser:
             self._label_frames[int(label)] = self._label_frames.get(int(label), 0) + 1
         self.frames += 1
 
-    def finalize(
+    def flush(
         self,
         *,
         eps: float | None = None,
@@ -114,6 +115,8 @@ class Fuser:
         min_frames: int = 1,
         frame: int = -1,
     ) -> dict:
+        """Snapshot the current accumulator as a labeled cloud (non-destructive:
+        the vote table is left intact, so pushing can continue afterward)."""
         eps = 2.0 * self.voxel if eps is None else eps
         keys, sums, counts = self._keys, self._sums, self._counts
         if len(keys):

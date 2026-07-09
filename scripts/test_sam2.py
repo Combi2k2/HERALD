@@ -45,11 +45,12 @@ def main() -> None:
     print(f"sam2: segmenting {len(indices)} frames (chunk={args.chunk})", flush=True)
     ids: set[int] = set()
     rgbs = (traj.load_rgb(i) for i in indices)
-    for k, lab in enumerate(stream.run_stream(rgbs)):
+    for k, (lab, conf) in enumerate(stream.run_stream(rgbs)):
         ids.update(int(i) for i in np.unique(lab) if i)
         rr.set_time("frame", sequence=indices[k])
         rr.log("camera/rgb", rr.Image(traj.load_rgb(indices[k])))
         rr.log("camera/seg", rr.SegmentationImage(lab))
+        rr.log("camera/conf", rr.Image((conf * 255).astype(np.uint8)))
         if (k + 1) % args.chunk == 0 or k == len(indices) - 1:
             print(f"  {k + 1}/{len(indices)} frames, {len(ids)} objects", flush=True)
 
