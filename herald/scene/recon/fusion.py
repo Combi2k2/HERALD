@@ -10,8 +10,10 @@ repeatedly between pushes to snapshot the cloud as the scene builds up.
 
 Low-confidence input is discarded before it can vote:
 - pixels: non-finite/zero/far depth, depth discontinuities (utils.depth_edge,
-  the "flying pixel" filter from vggt-omega), and a per-frame confidence
-  percentile (VGGT conf has no absolute scale, so the threshold is relative);
+  the "flying pixel" filter from vggt-omega), a per-frame VGGT-confidence
+  percentile (depth conf has no absolute scale, so the threshold is relative),
+  and an absolute SAM2 mask-confidence threshold (sigmoid of the mask logit,
+  so a fixed cutoff is meaningful) that drops uncertain/boundary label pixels;
 - mask borders: label maps are eroded so points cannot bleed across objects;
 - voxels/objects: flush() drops voxels with few hits, labels seen in few
   frames, and small or low-density DBSCAN clusters (utils.filter_clusters).
@@ -44,7 +46,8 @@ class Fuser:
         voxel: float = 0.1,
         stride: int = 2,
         max_depth: float = 60.0,
-        conf_pct: float = 0.0,
+        geo_conf_thresh: float = 0.0,
+        sem_conf_thresh: float = 0.0,
         edge_rtol: float = 0.0,
         erode: int = 1,
         ignore_ids: Sequence[int] = (),
@@ -54,7 +57,8 @@ class Fuser:
         self.voxel = voxel
         self.stride = max(1, stride)
         self.max_depth = max_depth
-        self.conf_pct = conf_pct
+        self.geo_conf_thresh = geo_conf_thresh
+        self.sem_conf_thresh = sem_conf_thresh
         self.edge_rtol = edge_rtol
         self.erode = max(0, erode)
         self.ignore_ids = frozenset(int(i) for i in ignore_ids)
@@ -65,8 +69,10 @@ class Fuser:
         self._label_frames: dict[int, int] = {}
         self.frames = 0
 
-    def push(self, geo, labels) -> None:
-        """Fuse one frame into the accumulator; `geo` is a VggtStream dict or a FrameGeometry."""
+    def push(self, geo, labels, sem_conf=None) -> None:
+        """Fuse one frame into the accumulator; `geo` is a VggtStream dict or a
+        FrameGeometry. `sem_conf` is the SAM2 per-pixel label confidence
+        (sigmoid of the mask logit); pixels below sem_conf_thresh are dropped."""
         get = geo.get if isinstance(geo, Mapping) else lambda k: getattr(geo, k, None)
         depth = np.asarray(get("depth"))
         lab = np.asarray(labels)
@@ -79,9 +85,14 @@ class Fuser:
         if self.edge_rtol > 0:
             valid &= ~depth_edge(depth, rtol=self.edge_rtol)
         conf = get("conf")
-        if conf is not None and self.conf_pct > 0 and np.any(valid):
+        if conf is not None and self.geo_conf_thresh > 0 and np.any(valid):
             conf = np.asarray(conf)
-            valid &= conf >= np.percentile(conf[valid], self.conf_pct)
+            valid &= conf >= np.percentile(conf[valid], self.geo_conf_thresh)
+        if sem_conf is not None and self.sem_conf_thresh > 0:
+            mc = np.asarray(sem_conf, np.float32)
+            if mc.shape != depth.shape:
+                mc = resize_nearest(mc, depth.shape)
+            valid &= mc >= self.sem_conf_thresh
 
         points, point_labels = unproject_labeled(
             depth, get("K"), get("c2w"), lab, stride=self.stride, valid=valid)

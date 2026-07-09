@@ -33,10 +33,14 @@ def w2c_to_c2w(w2c: np.ndarray) -> np.ndarray:
     c2w[:, :3, 3] = -np.einsum("sij,sj->si", rt, w2c[:, :3, 3])
     return c2w
 
-def resize_nearest(labels: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
-    """Nearest-neighbour resize of an integer label map to (H, W)."""
+def resize_nearest(arr: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
+    """Nearest-neighbour resize of a label (int) or confidence (float) map to (H, W)."""
     h, w = shape
-    img = Image.fromarray(np.asarray(labels).astype(np.int32), mode="I")
+    arr = np.asarray(arr)
+    if np.issubdtype(arr.dtype, np.floating):
+        img = Image.fromarray(arr.astype(np.float32), mode="F")
+        return np.asarray(img.resize((w, h), Image.NEAREST))
+    img = Image.fromarray(arr.astype(np.int32), mode="I")
     return np.asarray(img.resize((w, h), Image.NEAREST)).astype(np.int64)
 
 def erode_labels(labels: np.ndarray, iterations: int = 1, fill: int = -1) -> np.ndarray:
