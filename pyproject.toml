@@ -34,9 +34,10 @@ viz = [
 viewer = [
     "rerun-sdk>=0.20",
 ]
-# Phase-2 refinement: VGGT geometry brain + imaging deps. Heavy and CUDA-bound,
+# Phase-2 refinement: VGGT-Omega geometry brain + imaging deps. Heavy and CUDA-bound,
 # kept OUT of default-groups — install explicitly: uv sync --group recon
-# VGGT ships from GitHub (no PyPI). open3d omitted (no cp313 wheel; fusion is NumPy-only).
+# VGGT-Omega ships from GitHub (no PyPI); imported as `vggt_omega` in herald.scene.recon.vggt.
+# open3d omitted (no cp313 wheel; fusion is NumPy-only).
 recon = [
     "torch>=2.1",
     "torchvision>=0.16",
@@ -45,13 +46,22 @@ recon = [
     "einops>=0.7",
     "opencv-python>=4.8",
     "imageio>=2.31",
-    "vggt @ git+https://github.com/facebookresearch/vggt.git",
+    "vggt-omega @ git+https://github.com/facebookresearch/vggt-omega.git",
 ]
 # SAM2 video segmentation via HF Transformers (Sam2VideoModel needs >=4.56).
 # Heavy, kept OUT of default-groups — install explicitly: uv sync --group seg
 seg = [
     "torch>=2.1",
+    "torchvision>=0.16",  # Sam2ImageProcessor (the video processor's backbone) requires it
     "transformers>=4.56",
+    "sentencepiece>=0.2",  # SigLIP / SigLIP2 text tokenizer
+]
+# Open-vocab object detection (YOLO-World via ultralytics). Heavy/CUDA, kept OUT
+# of default-groups — install explicitly: uv sync --group det
+det = [
+    "ultralytics>=8.3",
+    "clip @ git+https://github.com/ultralytics/CLIP.git",  # YOLO-World text encoder (set_classes)
+    "ftfy>=6.0",
 ]
 
 [tool.uv]

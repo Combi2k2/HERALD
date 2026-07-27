@@ -1,20 +1,20 @@
 """Minimal RGB-stream reconstruction: VGGT-Omega geometry + SAM2 masks -> semantic cloud.
 
 The three submodules are independent of each other; the end-to-end script
-(scripts/recon_stream.py) wires them. Data flows as plain numpy arrays:
-vggt.VggtStream gives {"K","c2w","depth","conf"} per frame, sam2.Sam2Stream
-gives per-frame label maps, and fusion.Fuser votes both into a labeled cloud.
-Both streams expose run_chunk / run_video / run_stream plus the incremental
-push/finish interface.
+(scripts/test_recon.py, via pipeline.ReconStream) wires them. Data flows as plain numpy arrays:
+vggt.VggtStream gives {"K","c2w","depth","conf"} per frame, sam2.Sam2Segmenter
+gives per-frame instance masks, and fusion.Fuser associates the masks into
+objects (by appearance + occupancy) and votes them into a labeled cloud.
 
-vggt is not re-exported here (importing it pulls in torch + vggt_omega) and
-Sam2Stream is re-exported lazily (sam2 pulls in torch + transformers), so
-fusion-only users pay for neither. Import vggt directly as
+vggt is not re-exported here (importing it pulls in torch + vggt_omega), and
+Sam2Segmenter / SiglipEmbedder are re-exported lazily (they pull in torch +
+transformers), so fusion-only users pay for neither. Import vggt directly as
 herald.scene.recon.vggt.
 """
 
 from herald.scene.recon.fusion import Fuser
 from herald.scene.recon.utils import (
+    bbox_crop,
     erode_labels,
     filter_clusters,
     load_cloud,
@@ -25,7 +25,12 @@ from herald.scene.recon.utils import (
 
 __all__ = [
     "Fuser",
-    "Sam2Stream",
+    "Sam2Segmenter",
+    "Sam2Tracker",
+    "SiglipEmbedder",
+    "TrackReconStream",
+    "VoteCloud",
+    "bbox_crop",
     "erode_labels",
     "filter_clusters",
     "load_cloud",
@@ -35,8 +40,16 @@ __all__ = [
 ]
 
 def __getattr__(name: str):
-    if name == "Sam2Stream":
-        from herald.scene.recon.sam2 import Sam2Stream
+    if name == "Sam2Segmenter":
+        from herald.scene.recon.sam2 import Sam2Segmenter
 
-        return Sam2Stream
+        return Sam2Segmenter
+    if name == "SiglipEmbedder":
+        from herald.scene.recon.embed import SiglipEmbedder
+
+        return SiglipEmbedder
+    if name in ("Sam2Tracker", "VoteCloud", "TrackReconStream"):
+        from herald.scene.recon import track
+
+        return getattr(track, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

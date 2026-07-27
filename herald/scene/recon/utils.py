@@ -25,6 +25,59 @@ def iou(a: np.ndarray, b: np.ndarray) -> float:
     union = float(np.logical_or(a, b).sum())
     return inter / union if union else 0.0
 
+def bbox_crop(image: np.ndarray, mask: np.ndarray, pad: int = 0,
+              *, pad_frac: float = 0.0, bg_fade: float = 0.0) -> np.ndarray:
+    """Crop the RGB image to the mask's bounding box. The box is grown by `pad`
+    pixels *plus* `pad_frac` of the box's own size on each side (so `pad_frac`
+    scales the context window with the object: 0.5 pads a HxW box by H/2 top and
+    bottom, W/2 left and right). Returns the whole image for an empty mask.
+
+    `bg_fade` > 0 blends pixels *outside* the mask toward black by that fraction
+    (0.5 = halfway to black; 1.0 = solid black), leaving mask pixels untouched —
+    so an appearance embedding of the crop is dominated by the object, not by
+    whatever surrounds it in the (now larger) box. Widening the box with
+    `pad_frac` adds surrounding context; raising `bg_fade` suppresses it — the
+    two together trade off how much scene context reaches the embedding."""
+    ys, xs = np.where(mask)
+    if len(ys) == 0:
+        return image
+    y0, y1 = int(ys.min()), int(ys.max()) + 1
+    x0, x1 = int(xs.min()), int(xs.max()) + 1
+    py = pad + int(round(pad_frac * (y1 - y0)))
+    px = pad + int(round(pad_frac * (x1 - x0)))
+    if py or px:
+        h, w = image.shape[:2]
+        y0, x0 = max(0, y0 - py), max(0, x0 - px)
+        y1, x1 = min(h, y1 + py), min(w, x1 + px)
+    crop = image[y0:y1, x0:x1]
+    if bg_fade <= 0:
+        return crop
+    out = crop.astype(np.float32)
+    bg = ~np.asarray(mask, bool)[y0:y1, x0:x1]
+    out[bg] = (1.0 - bg_fade) * out[bg]
+    return out.astype(image.dtype)
+
+def masks_to_labels(masks, shape=None, values=None) -> np.ndarray:
+    """Paint a list of boolean instance masks into one int label image (0 =
+    background).
+
+    Without `values`, larger masks are painted first (mask k -> k+1) so smaller
+    (finer) masks win on overlap — the Fuser's convention. With `values` (one
+    label per mask, e.g. stable object color ids), masks are painted in the
+    given order with those labels and negatives are skipped — pass the masks
+    already largest-first so finer ones still win."""
+    if values is None:
+        order = sorted(masks, key=lambda m: int(np.asarray(m).sum()), reverse=True)
+        vals = range(1, len(order) + 1)
+    else:
+        order, vals = masks, values
+    shape = shape or (np.asarray(order[0]).shape if len(order) else (1, 1))
+    lab = np.zeros(shape, np.int32)
+    for v, m in zip(vals, order):
+        if int(v) >= 0:
+            lab[np.asarray(m, bool)] = int(v)
+    return lab
+
 def w2c_to_c2w(w2c: np.ndarray) -> np.ndarray:
     """(S,3,4) world-to-camera extrinsics -> (S,4,4) camera-to-world poses."""
     rt = w2c[:, :3, :3].transpose(0, 2, 1)  # R^T per frame
@@ -102,14 +155,53 @@ def unproject_labeled(
     world = cam @ c2w[:3, :3].T + c2w[:3, 3]
     return world, lab[ok].astype(np.int64)
 
+_DBSCAN = None  # cached (name, fit_predict) backend: cuML on GPU if present, else sklearn
+
+def _dbscan_backend():
+    """Resolve the DBSCAN backend once: RAPIDS cuML (GPU) when importable,
+    otherwise sklearn (CPU). Returns (name, run(points, eps, min_samples))."""
+    global _DBSCAN
+    if _DBSCAN is not None:
+        return _DBSCAN
+    try:
+        from cuml.cluster import DBSCAN as _cuDBSCAN
+
+        def run(pts, eps, min_samples):
+            comp = _cuDBSCAN(
+                eps=eps, min_samples=min_samples, output_type="numpy"
+            ).fit_predict(np.ascontiguousarray(pts, dtype=np.float32))
+            return np.asarray(comp)
+
+        _DBSCAN = ("cuml", run)
+    except Exception:
+        from sklearn.cluster import DBSCAN as _skDBSCAN
+
+        def run(pts, eps, min_samples):
+            return _skDBSCAN(eps=eps, min_samples=min_samples).fit_predict(pts)
+
+        _DBSCAN = ("sklearn", run)
+    return _DBSCAN
+
 def filter_clusters(
-    points: np.ndarray, *, eps: float, min_cluster: int, min_samples: int = 1
+    points: np.ndarray,
+    *,
+    eps: float,
+    min_cluster: int,
+    min_samples: int = 1,
+    labels: np.ndarray | None = None,
 ) -> np.ndarray:
     """Keep-mask for points in DBSCAN clusters of at least min_cluster points.
 
     min_samples=1 makes every point a core point, so DBSCAN reduces to plain
     eps-connectivity (no noise); raise it to also break low-density bridges
     and drop sparse points as noise.
+
+    Runs on the GPU via RAPIDS cuML when available, else sklearn on the CPU
+    (see _dbscan_backend). Pass `labels` (one per point) to cluster all points
+    in a single backend call: points are given an extra coordinate offset far
+    enough apart per label that clusters can never bridge two labels, which
+    keeps the result identical to clustering each label separately while paying
+    the GPU launch/transfer overhead once instead of once per label.
     """
     n = len(points)
     if n == 0:
@@ -117,9 +209,17 @@ def filter_clusters(
     if min_cluster <= 1 and min_samples <= 1:
         return np.ones(n, dtype=bool)
 
-    from sklearn.cluster import DBSCAN
+    if labels is None:
+        data = np.ascontiguousarray(points, dtype=np.float32)
+    else:
+        # dense-remap labels and separate them along a 4th axis by > eps so no
+        # eps-ball can span two labels (2*eps guards float32 rounding at scale).
+        _, dense = np.unique(np.asarray(labels), return_inverse=True)
+        sep = (dense.astype(np.float32) * (2.0 * eps))[:, None]
+        data = np.ascontiguousarray(np.concatenate([points, sep], axis=1), dtype=np.float32)
 
-    comp = DBSCAN(eps=eps, min_samples=min_samples).fit_predict(points)
+    _, run = _dbscan_backend()
+    comp = run(data, eps, min_samples)
     keep = comp >= 0  # DBSCAN marks noise as -1
     if keep.any():
         sizes = np.bincount(comp[keep])

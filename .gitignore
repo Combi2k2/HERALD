@@ -223,3 +223,16 @@ __marimo__/
 
 # Model weights (downloaded, multi-GB)
 checkpoints/
+
+# Job outputs / renders (runs/{job}/*.rrd, logs)
+runs/
+
+# Downloaded model weights (multi-100MB; re-fetch, don't commit)
+weights/
+*.pt
+
+# Editor swap files
+*.swp
+
+# Stray scratch notebooks
+Untitled*.ipynb
