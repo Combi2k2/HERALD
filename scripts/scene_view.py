@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-"""Replay a saved scene in the Rerun viewer."""
-
 from __future__ import annotations
 
 import argparse
@@ -14,7 +12,6 @@ from herald.scene.common.geometry import Frame
 from herald.scene.common.graph import SceneGraph
 from herald.scene.common.nav import NavGraph
 from herald.scene.common.repr import SceneRepr
-
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -41,7 +38,6 @@ def main() -> None:
     print(f"Run: {paths.run_id}  nodes: {len(graph.nodes)}  nav: {len(nav.nodes)}")
     print("Toggle semantic / hierarchy / nav in the entity tree. Close Rerun to exit.")
     input()
-
 
 if __name__ == "__main__":
     main()

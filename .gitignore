@@ -220,3 +220,25 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Model weights (downloaded, multi-GB)
+checkpoints/
+
+# Job outputs / renders (runs/{job}/*.rrd, logs)
+runs/
+
+# Downloaded model weights (multi-100MB; re-fetch, don't commit)
+weights/
+*.pt
+
+# Editor swap files
+*.swp
+
+# Stray scratch notebooks
+Untitled*.ipynb
+
+# Boxer is a pinned git submodule at third_party/boxer (code tracked via the gitlink;
+# its downloaded ckpts/ stay local — re-fetch with third_party/boxer/scripts/download_ckpts.sh).
+# Everything else under third_party/ is ignored.
+/third_party/*
+!/third_party/boxer

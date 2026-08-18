@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-"""Export raw osm.geojson features to a tag table (CSV, no geometry)."""
-
 from __future__ import annotations
 
 import argparse
@@ -9,7 +7,6 @@ from pathlib import Path
 
 from herald.data import RunPaths
 from herald.data.tabulate import load_osm_geojson, osm_features_to_rows, write_osm_table
-
 
 def _latest_run_id(data_dir: Path) -> str:
     runs = sorted(
@@ -20,7 +17,6 @@ def _latest_run_id(data_dir: Path) -> str:
     if not runs:
         raise FileNotFoundError(f"No runs under {data_dir}")
     return runs[0].name
-
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -60,7 +56,6 @@ def main() -> None:
 
     print(f"Features: {len(rows)}")
     print(f"Wrote -> {out_path}")
-
 
 if __name__ == "__main__":
     main()
