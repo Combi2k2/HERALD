@@ -237,5 +237,8 @@ weights/
 # Stray scratch notebooks
 Untitled*.ipynb
 
-# External research repos (Boxer, etc.) — vendored, not tracked
-third_party/
+# Boxer is a pinned git submodule at third_party/boxer (code tracked via the gitlink;
+# its downloaded ckpts/ stay local — re-fetch with third_party/boxer/scripts/download_ckpts.sh).
+# Everything else under third_party/ is ignored.
+/third_party/*
+!/third_party/boxer
