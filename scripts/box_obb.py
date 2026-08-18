@@ -43,18 +43,36 @@ def box_label_image(boxes: np.ndarray, shape) -> tuple[np.ndarray, np.ndarray]:
     return lab, order
 
 
-def estimate_ground(geo, indices, stride: int = 6, n_samples: int = 60,
-                    band: float = 0.15, max_depth: float = 40.0):
-    """Up direction + floor height from the *point cloud* (the floor plane is the
-    real gravity reference). The camera trajectory is only a prior: its plane
-    normal seeds up and fixes the sign (cameras ride above the floor). Then we
-    take the dominant low horizontal band -- the floor -- and refine up as the
-    PCA normal of those inliers, reading the floor offset `d` for free. Returns
-    (up unit(3), d) with the floor plane = {x : x . up == d}. Gauge-independent,
-    so it transfers to VGGT geometry."""
+def _ransac_plane(P: np.ndarray, thresh: float, iters: int, rng) -> tuple[np.ndarray, float]:
+    """Largest-support plane by RANSAC -> (unit normal, offset d), plane = {x: n.x == d}."""
+    best_n, best_d, best_cnt = np.array([0.0, 0.0, 1.0]), 0.0, -1
+    for _ in range(iters):
+        s = P[rng.integers(0, len(P), 3)]
+        n = np.cross(s[1] - s[0], s[2] - s[0])
+        nn = np.linalg.norm(n)
+        if nn < 1e-6:
+            continue
+        n = n / nn
+        d = float(n @ s[0])
+        cnt = int((np.abs(P @ n - d) < thresh).sum())
+        if cnt > best_cnt:
+            best_cnt, best_n, best_d = cnt, n, d
+    return best_n, best_d
+
+
+def estimate_ground(geo, indices, stride: int = 6, n_samples: int = 80,
+                    thresh: float = 0.05, iters: int = 400, max_depth: float = 40.0):
+    """Up direction + camera eye-height from the *point cloud*, via RANSAC of the
+    dominant floor plane (its largest flat support). Robust where a global
+    least-variance axis tilts -- multi-level scenes, big walls -- and
+    gauge-independent, so it transfers to VGGT geometry. Cameras disambiguate the
+    sign (they ride above the floor). Returns (up unit(3), eye), where `eye` is
+    the typical camera height above the LOCAL floor: ground removal then uses a
+    per-frame cut floor_i = cam_i . up - eye, which handles multiple levels
+    (a single global floor plane would only clear the lowest one)."""
     sel = indices[:: max(1, len(indices) // n_samples)]
     rng = np.random.default_rng(0)
-    cams, chunks = [], []
+    cams, frames = [], []
     for i in sel:
         g = geo.geometry(i)
         cams.append(g.c2w[:3, 3])
@@ -62,39 +80,32 @@ def estimate_ground(geo, indices, stride: int = 6, n_samples: int = 60,
         p, _ = unproject_labeled(g.depth, g.K, g.c2w, np.ones(g.depth.shape, np.uint16),
                                  stride=stride, valid=valid)
         if len(p):
-            chunks.append(p[rng.integers(0, len(p), min(len(p), 4000))])
+            frames.append(p[rng.integers(0, len(p), min(len(p), 4000))])
     cams = np.asarray(cams)
-    pts = np.concatenate(chunks)
-    c = cams - cams.mean(0)
-    _, ev = np.linalg.eigh(c.T @ c)
-    up = ev[:, 0]                                     # trajectory-plane normal (prior)
-    if np.median(pts @ up) > np.median(cams @ up):    # cameras must sit 'above' the scene
-        up = -up
-    h = pts @ up
-    below = h[h < np.median(cams @ up)]               # candidate floor points (below eye level)
-    hist, edges = np.histogram(below, bins=200)
-    fh = 0.5 * (edges[hist.argmax()] + edges[hist.argmax() + 1])   # floor height = low mode
-    inl = pts[np.abs(h - fh) < band]                  # floor-band inliers
+    pts = np.concatenate(frames)
+    n, d = _ransac_plane(pts, thresh, iters, rng)
+    if np.median(cams @ n) < d:                       # orient up so cameras sit above the floor
+        n, d = -n, -d
+    inl = pts[np.abs(pts @ n - d) < thresh]           # refine on floor inliers
     q = inl - inl.mean(0)
-    _, ev2 = np.linalg.eigh(q.T @ q)
-    n = ev2[:, 0]                                     # refined normal from the floor plane
-    if n @ up < 0:
-        n = -n
-    up = n / np.linalg.norm(n)
-    d = float(np.median(inl @ up))
-    return up, d
+    _, V = np.linalg.eigh(q.T @ q)
+    up = V[:, 0]
+    up = (up if up @ n > 0 else -up)
+    up = up / np.linalg.norm(up)
+    eyes = [c @ up - np.percentile(f @ up, 3) for c, f in zip(cams, frames) if len(f) > 500]
+    return up, float(np.median(eyes))
 
 
-def foreground(pts: np.ndarray, cam: np.ndarray, up: np.ndarray, floor_d: float,
+def foreground(pts: np.ndarray, cam: np.ndarray, up: np.ndarray, floor_h: float,
                eps: float, min_samples: int, min_pts: int,
                floor_margin: float = 0.08) -> np.ndarray | None:
     """Geometric background removal: (1) cut everything within `floor_margin` of
-    the global floor plane {x : x . up == floor_d} -- DBSCAN can't split the
-    ground because it is physically connected to the object base -- then (2) keep
-    the nearest substantial DBSCAN cluster (drops the disconnected wall behind)."""
+    the local floor (height `floor_h` along `up`, = cam.up - eye) -- DBSCAN can't
+    split the ground because it is physically connected to the object base --
+    then (2) keep the nearest substantial DBSCAN cluster (drops the wall behind)."""
     if len(pts) < min_pts:
         return None
-    pts = pts[(pts @ up) > floor_d + floor_margin]      # global floor-plane cut
+    pts = pts[(pts @ up) > floor_h + floor_margin]      # per-frame local floor cut
     if len(pts) < min_pts:
         return None
     lab = DBSCAN(eps=eps, min_samples=min_samples).fit_predict(pts)
@@ -167,8 +178,8 @@ def main() -> None:
         raise SystemExit(f"no frames under {traj.base}")
 
     geo = TartanGroundGeometry(traj)
-    up, floor_d = estimate_ground(geo, indices, max_depth=args.max_depth)
-    print(f"ground: up={np.round(up, 3).tolist()}  floor_d={floor_d:.3f}", flush=True)
+    up, eye = estimate_ground(geo, indices, max_depth=args.max_depth)
+    print(f"ground: up={np.round(up, 3).tolist()}  eye_height={eye:.3f}m", flush=True)
 
     from ultralytics import YOLOWorld
 
@@ -220,7 +231,7 @@ def main() -> None:
         for rank in np.unique(plab):
             if rank <= 0:
                 continue
-            fg = foreground(pts[plab == rank], cam, up, floor_d, args.dbscan_eps,
+            fg = foreground(pts[plab == rank], cam, up, cam @ up - eye, args.dbscan_eps,
                             args.min_samples, args.min_pts, args.floor_margin)
             if fg is None:
                 continue

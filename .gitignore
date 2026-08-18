@@ -236,3 +236,6 @@ weights/
 
 # Stray scratch notebooks
 Untitled*.ipynb
+
+# External research repos (Boxer, etc.) — vendored, not tracked
+third_party/

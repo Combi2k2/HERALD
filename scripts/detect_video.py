@@ -28,6 +28,7 @@ DEFAULT_VOCAB = [
     "lamp", "light", "sign", "fire extinguisher", "clock", "plant", "bottle",
     "cup", "bag", "pillow", "blanket", "towel", "mirror", "whiteboard", "book",
     "basket", "bucket", "ladder", "backpack", "fan", "picture frame",
+    "stair", "entrance",
 ]
 
 

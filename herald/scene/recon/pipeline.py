@@ -1,76 +1,112 @@
-"""End-to-end RGB-stream reconstruction: VGGT geometry + SAM2 masks -> Fuser.
+"""Tier-1 per-session reconstruction: RGB(-D) -> static scene cloud + static OBBs.
 
-ReconStream rolls the three recon submodules into one push/flush interface.
-Feed frames with push(); geometry is either supplied per frame (a VGGT-style
-{"K","c2w","depth"[,"conf"]} dict or FrameGeometry, e.g. dataset GT) or
-predicted by a VggtStream, and SAM2 segments every frame into instance masks.
-Each frame's (masks, rgb) is queued alongside its geometry; because VGGT may
-buffer frames into chunks while SAM2 emits per frame, the two queues drain in
-lockstep so each fused frame pairs the right geometry with the right masks.
-
-The Fuser associates masks into objects by appearance + occupancy (see
-fusion.py), so it needs both the masks and the RGB frame they came from.
-
-flush() is a non-destructive cloud snapshot (call it between pushes to watch
-the scene build up); finish() drains the VGGT buffer and returns the final
-cloud.
-"""
+SessionRecon streams frames through the Boxer engine (services.boxer: detect ->
+3D lift -> Hungarian tracker), accumulates the whole-scene colored point cloud, and
+filters in-video movers with the corridor filter -- both online (a dynamic track's
+2D box is skipped when unprojecting the scene cloud, so movers never smear it) and
+at finalize (movers are dropped from the object list). All dynamic-object logic
+lives here; Boxer just reports the per-frame track association. Knows nothing about
+the multi-session map -- that is Tier 2 (refine)."""
 
 from __future__ import annotations
 
-from collections import deque
-from typing import Sequence
+import numpy as np
 
-from herald.scene.recon.fusion import Fuser
-from herald.scene.recon.sam2 import Sam2Segmenter
-from herald.scene.recon.utils import as_rgb
+from herald.scene.recon.corridor import classify_static, motion
+from herald.scene.recon.types import SceneObject, SessionResult
+from herald.scene.recon.utils import SceneCloud, obb_inter_vol, quat_to_R, unproject_rgb
 
 
-class ReconStream:
-    """Push RGB (+ optional geometry) frames, flush a semantic point cloud."""
+def suppress_contained(objs: list, thresh: float = 0.7) -> list:
+    """Drop object dicts whose OBB is >= `thresh` contained within a strictly larger
+    object's OBB -- part-of-a-whole detections (a bench 'seat' inside the bench) that
+    would otherwise start their own jumpy track and read as false movers. Containment
+    = (exact intersection volume) / (small-box volume); only genuine nesting fires, so
+    real objects merely near each other are kept."""
+    R = [quat_to_R(o["quat_xyzw"]) for o in objs]
+    half = [np.asarray(o["size"], np.float32) for o in objs]
+    vol = [8.0 * float(np.prod(h)) for h in half]                    # full-box volume
+    keep = [True] * len(objs)
+    for i in range(len(objs)):
+        for j in range(len(objs)):
+            if i == j or not keep[j] or vol[j] <= vol[i]:            # j must be the larger box
+                continue
+            inter = obb_inter_vol(objs[i]["center"], half[i], R[i], objs[j]["center"], half[j], R[j])
+            if inter / vol[i] >= thresh:                             # >= thresh of box i sits inside box j
+                keep[i] = False
+                break
+    return [o for o, k in zip(objs, keep) if k]
 
-    def __init__(self, sam2: Sam2Segmenter, fuser: Fuser, *, vggt=None) -> None:
-        self.sam2 = sam2      # segments every frame into instance masks
-        self.vggt = vggt      # VggtStream, or None when geometry is supplied to push()
-        self.fuser = fuser
-        self._geo: deque = deque()
-        self._lab: deque = deque()    # (masks, rgb) per frame, in order
 
-    def _drain(self) -> None:
-        while self._geo and self._lab:
-            masks, rgb = self._lab.popleft()
-            self.fuser.push(self._geo.popleft(), masks, rgb)
+def _scene_object(o: dict, session_id: str) -> SceneObject:
+    """Boxer's per-track dict -> a unified SceneObject. For a single session the object's
+    identity is its track id, and its provenance is this one session's support/conf/track +
+    crop references (frame_idx + 2D box, resolved to thumbnails against the source path)."""
+    tid = int(o["track_id"])
+    support, conf = int(o["support"]), float(o.get("conf", 0.0))
+    return SceneObject(uid=tid, center=o["center"], half_size=o["size"],
+                       quat_xyzw=o["quat_xyzw"], label=o["label"], labels=dict(o["labels"]),
+                       conf=conf, support=support,
+                       sessions={session_id: {"support": support, "conf": conf, "track_id": tid,
+                                              "crops": list(o.get("crop_refs", []))}},
+                       embedding=None)
 
-    def push(self, rgb, geo=None, masks=None) -> None:
-        """Feed one frame. `rgb` is an image path (required if VGGT predicts
-        geometry) or an RGB array; `geo` is a per-frame VGGT-style dict /
-        FrameGeometry that, when given, is used directly instead of running
-        VGGT. Pass `masks` to reuse masks already computed by
-        `self.sam2.segment(rgb)` (e.g. to render them) instead of segmenting
-        again."""
-        rgb = as_rgb(rgb)
-        if geo is None:
-            if self.vggt is None:
-                raise RuntimeError("no geometry given and no VggtStream to predict it")
-            self._geo.extend(self.vggt.push(rgb))
-        else:
-            self._geo.append(geo)
-        self._lab.append((self.sam2.segment(rgb) if masks is None else masks, rgb))
-        self._drain()
 
-    def flush(self, **kw) -> dict:
-        """Non-destructive snapshot of the frames fused so far."""
-        return self.fuser.flush(**kw)
+class SessionRecon:
+    """Per-session recon over one video. Drive it frame by frame with add_frame()
+    (returns the 2D detections for live rendering) then finalize(), or headless via
+    run(geometry.frames(...)). Boxer keyword args pass straight through."""
 
-    def finish(self, **kw) -> dict:
-        """Drain the VGGT buffer, then return the final cloud."""
-        if self.vggt is not None:
-            self._geo.extend(self.vggt.finish())
-        self._drain()
-        return self.fuser.flush(**kw)
+    def __init__(self, vocab, *, device="cuda", scene_voxel=0.1, scene_stride=8,
+                 max_depth=60.0, corridor_step=0.2, contain_thr=0.7,
+                 dyn_min_support=8, **boxer_kw):
+        from services.boxer import BoxerPipeline
 
-    def run_video(self, frames: Sequence, geos: Sequence | None = None, **kw) -> dict:
-        """Whole-sequence convenience: push every frame, then finish()."""
-        for i, f in enumerate(frames):
-            self.push(f, None if geos is None else geos[i])
-        return self.finish(**kw)
+        self.pipe = BoxerPipeline(vocab, device=device, online=True, **boxer_kw)
+        self.scene = SceneCloud(voxel=scene_voxel)
+        self.scene_stride = scene_stride
+        self.max_depth = max_depth
+        self.corridor_step = corridor_step
+        self.contain_thr = contain_thr
+        self.dyn_min_support = dyn_min_support
+        self._traj: dict[int, list] = {}   # track_id -> [world centroid (NED)] this session
+        self._dyn: set[int] = set()        # tracks whose corridor already marks them dynamic
+
+    def add_frame(self, rgb, K, c2w, depth, frame_idx=0) -> dict:
+        info = self.pipe.add_frame(rgb, K, c2w, depth, frame_idx=frame_idx)
+        valid = np.isfinite(depth) & (depth > 0) & (depth < self.max_depth)
+        # Corridor filter: grow each matched track's trajectory and flag it dynamic
+        # once its per-step motion crosses the threshold. The flag is sticky (never
+        # cleared), so a dynamic track's 2D box stays cut from `valid` and its pixels
+        # never reach the scene cloud -- otherwise a mover smears a trail across it.
+        for tid, box, ctr in zip(info.get("match_tids", ()), info.get("match_boxes", ()),
+                                 info.get("match_centers", ())):
+            tid = int(tid)
+            self._traj.setdefault(tid, []).append(ctr)
+            if tid not in self._dyn and motion(self._traj[tid]) > self.corridor_step:
+                self._dyn.add(tid)
+            if tid in self._dyn:
+                x0, y0, x1, y1 = box.astype(int)
+                valid[max(0, y0):max(0, y1), max(0, x0):max(0, x1)] = False
+        pts, cols = unproject_rgb(depth, K, c2w, rgb, self.scene_stride, valid)
+        self.scene.add(pts, cols)
+        return info
+
+    def finalize(self, session_id: str = "session", source: str | None = None) -> SessionResult:
+        objs = self.pipe.objects()                                 # conf kept as attribute, not a filter
+        objs = suppress_contained(objs, thresh=self.contain_thr)   # drop part-of-a-whole boxes
+        for o in objs:
+            o["traj"] = np.asarray(self._traj.get(o["track_id"], ()), np.float32)
+        static, dynamic = classify_static(objs, max_step=self.corridor_step,
+                                          min_support=self.dyn_min_support)
+        pts, cols = self.scene.cloud()
+        meta = {"sessions": [session_id]}
+        if source is not None:                                     # path to resolve crop refs at render time
+            meta["sources"] = {session_id: str(source)}
+        return SessionResult(pts, cols, [_scene_object(o, session_id) for o in static],
+                             dynamic=[_scene_object(o, session_id) for o in dynamic], meta=meta)
+
+    def run(self, frames, session_id: str = "session", source: str | None = None) -> SessionResult:
+        for fi, rgb, K, c2w, depth in frames:
+            self.add_frame(rgb, K, c2w, depth, frame_idx=fi)
+        return self.finalize(session_id, source)

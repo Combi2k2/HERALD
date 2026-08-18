@@ -92,6 +92,58 @@ class ObjectMap:
             yield g, v[:, :3] / v[:, 3:4], o["cls"], o["n_obs"]
 
 
+def unproject_rgb(depth, K, c2w, rgb, stride, valid):
+    """Lift valid depth pixels to world points + their RGB (mirrors
+    utils.unproject_labeled's pinhole/stride convention)."""
+    h, w = depth.shape
+    d = depth[::stride, ::stride]
+    vs, us = np.mgrid[0:h:stride, 0:w:stride]
+    ok = np.isfinite(d) & (d > 0)
+    if valid is not None:
+        ok &= valid[::stride, ::stride]
+    if not np.any(ok):
+        return np.empty((0, 3)), np.empty((0, 3), np.uint8)
+    z = d[ok].astype(np.float64)
+    u = us[ok].astype(np.float64)
+    v = vs[ok].astype(np.float64)
+    cam = np.stack([(u - K[0, 2]) / K[0, 0] * z, (v - K[1, 2]) / K[1, 1] * z, z], axis=1)
+    world = cam @ np.asarray(c2w)[:3, :3].T + np.asarray(c2w)[:3, 3]
+    return world, rgb[::stride, ::stride][ok]
+
+
+class SceneCloud:
+    """Voxel-downsampled colored cloud of the whole scene (background included),
+    for context viz. One running centroid + mean RGB per occupied voxel, so
+    memory is bounded by explored volume, not frame count."""
+
+    def __init__(self, voxel: float = 0.1):
+        self.voxel = voxel
+        self._acc: dict[int, list] = {}   # code -> [sx,sy,sz, sr,sg,sb, n]
+
+    def add(self, pts: np.ndarray, cols: np.ndarray) -> None:
+        if len(pts) == 0:
+            return
+        k = np.floor(pts / self.voxel).astype(np.int64) + _OFF
+        codes = (k[:, 0] << 42) | (k[:, 1] << 21) | k[:, 2]
+        uniq, inv = np.unique(codes, return_inverse=True)
+        ps = np.zeros((len(uniq), 3)); np.add.at(ps, inv, pts)
+        cs = np.zeros((len(uniq), 3)); np.add.at(cs, inv, cols.astype(np.float64))
+        cnt = np.bincount(inv).astype(np.float64)
+        for j, c in enumerate(uniq.tolist()):
+            e = self._acc.get(c)
+            if e is None:
+                self._acc[c] = [ps[j, 0], ps[j, 1], ps[j, 2], cs[j, 0], cs[j, 1], cs[j, 2], cnt[j]]
+            else:
+                e[0] += ps[j, 0]; e[1] += ps[j, 1]; e[2] += ps[j, 2]
+                e[3] += cs[j, 0]; e[4] += cs[j, 1]; e[5] += cs[j, 2]; e[6] += cnt[j]
+
+    def cloud(self):
+        if not self._acc:
+            return np.empty((0, 3)), np.empty((0, 3), np.uint8)
+        v = np.asarray(list(self._acc.values()))
+        return v[:, :3] / v[:, 6:7], (v[:, 3:6] / v[:, 6:7]).astype(np.uint8)
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--root", type=Path, default=Path("data/tartanground"))
@@ -116,6 +168,10 @@ def main() -> None:
     p.add_argument("--min-vox", type=int, default=5, help="drop objects with fewer voxels")
     p.add_argument("--min-obs", type=int, default=2, help="drop objects seen in fewer frames")
     p.add_argument("--snapshot-every", type=int, default=64)
+    # --- whole-scene viz ---
+    p.add_argument("--scene-voxel", type=float, default=0.1, help="voxel size (m) for the scene cloud")
+    p.add_argument("--scene-stride", type=int, default=8, help="pixel stride for the scene cloud")
+    p.add_argument("--no-scene", action="store_true", help="skip the whole-scene background cloud")
     p.add_argument("--device", default="cuda")
     p.add_argument("--out", type=Path, default=None)
     args = p.parse_args()
@@ -129,9 +185,10 @@ def main() -> None:
         raise SystemExit(f"no frames under {traj.base}")
 
     geo = TartanGroundGeometry(traj)
-    up, floor_d = estimate_ground(geo, indices, max_depth=args.max_depth)
+    up, eye = estimate_ground(geo, indices, max_depth=args.max_depth)
     omap = ObjectMap(voxel=args.merge_voxel, merge_overlap=args.merge_overlap,
                      class_gate=not args.no_class_gate)
+    scene = None if args.no_scene else SceneCloud(voxel=args.scene_voxel)
 
     from ultralytics import YOLOWorld
 
@@ -144,7 +201,7 @@ def main() -> None:
     rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Z_DOWN, static=True)
     print(f"{args.env}/{args.traj}: object-recon over {len(indices)} frames "
           f"(merge_overlap={args.merge_overlap}, class_gate={not args.no_class_gate}, "
-          f"up={np.round(up, 3).tolist()}, floor_d={floor_d:.3f})", flush=True)
+          f"up={np.round(up, 3).tolist()}, eye_height={eye:.3f}m)", flush=True)
 
     def snapshot(fi: int) -> int:
         pts, gids, centers, halves, quats, labels = [], [], [], [], [], []
@@ -180,17 +237,22 @@ def main() -> None:
         if len(centers_path) > 1:
             rr.log("world/path", rr.LineStrips3D([np.asarray(centers_path)], colors=[(255, 0, 255)]))
 
+        cam = g.c2w[:3, 3]
+        valid = np.isfinite(g.depth) & (g.depth > 0) & (g.depth < args.max_depth)
+        if scene is not None:
+            sp, sc = unproject_rgb(g.depth, g.K, g.c2w, rgb, args.scene_stride, valid)
+            scene.add(sp, sc)
+
         if len(boxes):
             rr.log("world/camera/image/boxes", rr.Boxes2D(
                 mins=boxes[:, :2], sizes=boxes[:, 2:] - boxes[:, :2], labels=[names[c] for c in cls]))
             lab, order = box_label_image(boxes, (h, w))
-            valid = np.isfinite(g.depth) & (g.depth > 0) & (g.depth < args.max_depth)
             pts, plab = unproject_labeled(g.depth, g.K, g.c2w, lab, stride=args.pixel_stride, valid=valid)
-            cam = g.c2w[:3, 3]
+            floor_h = float(cam @ up - eye)              # local floor on the camera's current level
             for rank in np.unique(plab):
                 if rank <= 0:
                     continue
-                fg = foreground(pts[plab == rank], cam, up, floor_d, args.dbscan_eps,
+                fg = foreground(pts[plab == rank], cam, up, floor_h, args.dbscan_eps,
                                 args.min_samples, args.min_pts, args.floor_margin)
                 if fg is not None:
                     omap.update(fg, names[int(cls[order[rank - 1]])])
@@ -201,6 +263,10 @@ def main() -> None:
             print(f"  frame {i}: {n} objects  [{dt:.0f}s, {dt / k:.2f}s/frame]", flush=True)
 
     n = snapshot(indices[-1])
+    if scene is not None:
+        sp, sc = scene.cloud()
+        rr.log("world/scene", rr.Points3D(sp, colors=sc, radii=0.01), static=True)
+        print(f"scene cloud: {len(sp)} voxels", flush=True)
     dt = time.perf_counter() - t0
     print(f"PERF: {len(indices)} frames in {dt:.1f}s = {dt / len(indices):.2f}s/frame", flush=True)
     print(f"FINAL: {n} objects", flush=True)

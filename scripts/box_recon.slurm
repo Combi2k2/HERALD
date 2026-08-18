@@ -33,6 +33,9 @@ MIN_VOX=${MIN_VOX:-5}
 MIN_OBS=${MIN_OBS:-2}
 SNAPSHOT_EVERY=${SNAPSHOT_EVERY:-64}
 CLASS_GATE=${CLASS_GATE:-1}          # 0 => --no-class-gate
+SCENE_VOXEL=${SCENE_VOXEL:-0.1}
+SCENE_STRIDE=${SCENE_STRIDE:-8}
+NO_SCENE=${NO_SCENE:-0}              # 1 => --no-scene
 
 RUN_DIR=$REPO/runs/${SLURM_JOB_ID:-manual}
 mkdir -p "$RUN_DIR"
@@ -57,6 +60,8 @@ MAXF_ARG=""
 [ "$MAX_FRAMES" -gt 0 ] && MAXF_ARG="--max-frames $MAX_FRAMES"
 CLASS_ARG=""
 [ "$CLASS_GATE" = "0" ] && CLASS_ARG="--no-class-gate"
+SCENE_ARG=""
+[ "$NO_SCENE" = "1" ] && SCENE_ARG="--no-scene"
 
 "$PY" scripts/box_recon.py \
     --root "$REPO/data/tartanground" \
@@ -70,7 +75,9 @@ CLASS_ARG=""
     --merge-voxel "$MERGE_VOXEL" --merge-overlap "$MERGE_OVERLAP" \
     --min-vox "$MIN_VOX" --min-obs "$MIN_OBS" \
     --snapshot-every "$SNAPSHOT_EVERY" \
+    --scene-voxel "$SCENE_VOXEL" --scene-stride "$SCENE_STRIDE" \
     $CLASS_ARG \
+    $SCENE_ARG \
     --device cuda \
     --out "$RRD"
 
