@@ -1,55 +1,26 @@
-"""Minimal RGB-stream reconstruction: VGGT-Omega geometry + SAM2 masks -> semantic cloud.
+"""Tier-1 per-session reconstruction: RGB(-D) -> static scene cloud + static OBBs.
 
-The three submodules are independent of each other; the end-to-end script
-(scripts/test_recon.py, via pipeline.ReconStream) wires them. Data flows as plain numpy arrays:
-vggt.VggtStream gives {"K","c2w","depth","conf"} per frame, sam2.Sam2Segmenter
-gives per-frame instance masks, and fusion.Fuser associates the masks into
-objects (by appearance + occupancy) and votes them into a labeled cloud.
+SessionRecon (pipeline.py) drives the Boxer detect/lift/track engine
+(services.boxer), accumulates the scene cloud (utils.SceneCloud), and drops
+in-video movers via the corridor filter (corridor.py) -> a SessionResult
+(types.py). Geometry comes from GT (datasets) or VGGT (services.vggt), adapted in
+geometry.py.
 
-vggt is not re-exported here (importing it pulls in torch + vggt_omega), and
-Sam2Segmenter / SiglipEmbedder are re-exported lazily (they pull in torch +
-transformers), so fusion-only users pay for neither. Import vggt directly as
-herald.scene.recon.vggt.
+types/corridor/geometry are numpy-only and import eagerly; SessionRecon pulls in
+Boxer (torch), so it is loaded lazily -- importing this package stays cheap.
 """
 
-from herald.scene.recon.fusion import Fuser
-from herald.scene.recon.utils import (
-    bbox_crop,
-    erode_labels,
-    filter_clusters,
-    load_cloud,
-    save_cloud,
-    unproject_labeled,
-    write_ply,
-)
+from herald.scene.recon.corridor import classify_static
+from herald.scene.recon.geometry import GtGeometry, VggtGeometry
+from herald.scene.recon.types import SceneMap, SceneObject, SessionResult
 
-__all__ = [
-    "Fuser",
-    "Sam2Segmenter",
-    "Sam2Tracker",
-    "SiglipEmbedder",
-    "TrackReconStream",
-    "VoteCloud",
-    "bbox_crop",
-    "erode_labels",
-    "filter_clusters",
-    "load_cloud",
-    "save_cloud",
-    "unproject_labeled",
-    "write_ply",
-]
+__all__ = ["SessionRecon", "SceneMap", "SessionResult", "SceneObject",
+           "classify_static", "GtGeometry", "VggtGeometry"]
+
 
 def __getattr__(name: str):
-    if name == "Sam2Segmenter":
-        from herald.scene.recon.sam2 import Sam2Segmenter
+    if name == "SessionRecon":
+        from herald.scene.recon.pipeline import SessionRecon
 
-        return Sam2Segmenter
-    if name == "SiglipEmbedder":
-        from herald.scene.recon.embed import SiglipEmbedder
-
-        return SiglipEmbedder
-    if name in ("Sam2Tracker", "VoteCloud", "TrackReconStream"):
-        from herald.scene.recon import track
-
-        return getattr(track, name)
+        return SessionRecon
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
