@@ -24,7 +24,8 @@ class SceneObject(SceneNode):
                  conf=0.0, support=0, sessions=None, embedding=None):
         refs = [SourceRef(assigned_by=str(sid), assigned_id=str(p.get("track_id")),
                           supp=int(p.get("support", 0)), conf=float(p.get("conf", 0.0)),
-                          metadata={"crops": list(p.get("crops", [])), "frames": list(p.get("frames", []))})
+                          metadata={"crops": [[int(f), [float(v) for v in b]] for f, b in p.get("crops", [])],
+                                    "frames": [int(x) for x in p.get("frames", [])]})
                 for sid, p in (sessions or {}).items()]
         super().__init__(uid=int(uid), level="object",
                          geom=Geometry(type="obb", frame="NED", offset=center,

@@ -57,18 +57,40 @@ class RouteGraph:
         self.nodes: list[RouteNode] = nodes or []
         self.edges: list[RouteEdge] = edges or []
 
-    def absorb(self, other: RouteGraph, *, radius: float) -> None:
-        """Fold another route graph in: append its nodes and edges, then link its nodes to the
-        pre-existing ones with proximity edges (any pair within `radius`)."""
-        from scipy.spatial import cKDTree
-        base = self.nodes[:]
+    def absorb(self, other: RouteGraph) -> None:
+        """Append another route graph's nodes and edges (no fusion; ids stay stable). Call
+        add_proximity_edges afterwards to link the newly-absorbed nodes to the rest."""
         self.nodes.extend(other.nodes)
         self.edges.extend(other.edges)
-        if base and other.nodes:
-            tree = cKDTree(np.array([n.pos for n in base], np.float32))
-            for n in other.nodes:
-                for i in tree.query_ball_point(np.asarray(n.pos, np.float32), radius):
-                    self.edges.append(RouteEdge(base[i].id, n.id, "derived"))
+
+    def add_proximity_edges(self, radius: float, *, min_seq_gap: int = 3) -> int:
+        """Link any node pair within `radius` that isn't already edged: intra-session loop closure
+        (a revisited place joins its two passes) and cross-session fusion, without moving/merging a
+        node. A same-session pair whose sequence indices differ by < min_seq_gap is skipped (already
+        chained along the path). Returns the number of edges added."""
+        from scipy.spatial import cKDTree
+        if len(self.nodes) < 2:
+            return 0
+        P = np.array([n.pos for n in self.nodes], np.float32)
+        idx = {n.id: i for i, n in enumerate(self.nodes)}
+        existing = {(min(a, b), max(a, b)) for a, b in
+                    ((idx[e.source_id], idx[e.target_id]) for e in self.edges)}
+
+        def seg(i: int):
+            r = self.nodes[i].refs[0] if self.nodes[i].refs else None
+            return (r.assigned_id, r.metadata.get("seq")) if r else (None, None)
+
+        added = 0
+        for i, j in cKDTree(P).query_pairs(radius):
+            if (i, j) in existing:
+                continue
+            si, gi = seg(i)
+            sj, gj = seg(j)
+            if si is not None and si == sj and gi is not None and gj is not None and abs(int(gi) - int(gj)) < min_seq_gap:
+                continue
+            self.edges.append(RouteEdge(self.nodes[i].id, self.nodes[j].id, "derived"))
+            added += 1
+        return added
 
     def shortest_path(self, a: str, b: str) -> float:
         from scipy.sparse import csr_matrix
