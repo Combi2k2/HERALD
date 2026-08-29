@@ -10,8 +10,8 @@ from __future__ import annotations
 
 from herald.scene.refine.align import AlignResult, align, align_sessions, fit_ground_plane
 from herald.scene.refine.reconcile import (
-    load_meta, load_session, reconcile, save_session, transform_object,
+    load_meta, load_session, overlap_merge, reconcile, save_session, transform_object,
 )
 
 __all__ = ["AlignResult", "align", "align_sessions", "fit_ground_plane", "reconcile",
-           "transform_object", "save_session", "load_session", "load_meta"]
+           "overlap_merge", "transform_object", "save_session", "load_session", "load_meta"]

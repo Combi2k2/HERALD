@@ -49,6 +49,9 @@ def main() -> None:
                    help="median per-frame centroid step (m) above which an object is dynamic")
     p.add_argument("--max-range", type=float, default=15.0,
                    help="per-frame box-quality gate: max camera->box distance (m) to trust a box")
+    p.add_argument("--min-visible", type=float, default=0.0,
+                   help="per-frame box-quality gate: min fraction of the reprojected 3D OBB inside "
+                        "the frame to trust a box (0 disables; e.g. 0.6 drops truncated edge lifts)")
     p.add_argument("--scene-voxel", type=float, default=0.12)
     p.add_argument("--scene-stride", type=int, default=8)
     p.add_argument("--snap", type=int, default=128, help="frames between live snapshots")
@@ -70,7 +73,8 @@ def main() -> None:
                          conf_thr3d=args.conf_thr3d, iou_thr=args.iou_thr, min_obs=args.min_obs,
                          n_crops=args.n_crops, scene_voxel=args.scene_voxel,
                          scene_stride=args.scene_stride, max_depth=args.max_depth,
-                         corridor_step=args.corridor_step, max_range=args.max_range)
+                         corridor_step=args.corridor_step, max_range=args.max_range,
+                         min_visible=args.min_visible)
 
     import rerun as rr
     import rerun.blueprint as rrb

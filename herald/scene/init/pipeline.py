@@ -24,7 +24,7 @@ from services.vlm import VLMClient
 from utils.osm_filter import polygon_disposition
 from utils.osm_helpers import context_tags, osm_tags
 
-SITE_NODE_ID = "site_000"
+SITE_UID = 0
 
 
 def _wgs_ring(coords) -> list[list[float]]:
@@ -47,13 +47,14 @@ def seed_graph(
     graph = SceneGraph(emb_model_id=emb_model_id, vlm_model_id=vlm_model_id)
     graph.add_node(
         SceneNode(
-            id=SITE_NODE_ID,
-            pid=None,
-            type="site",
+            uid=SITE_UID,
+            parent=None,
+            level="site",
             geom=Geometry(type="polygon", frame="WGS", coords=_wgs_ring(roi.latlon_vertices())),
         )
     )
 
+    uid = SITE_UID
     for poly in raw_polygons:
         ring = _wgs_ring(poly.geometry)
         if len(ring) < 4:
@@ -66,11 +67,12 @@ def seed_graph(
             max_area=MAX_NODE_AREA,
         ) != "hierarchy":
             continue
+        uid += 1
         graph.add_node(
             SceneNode(
-                id=f"node_{poly.osm_id}",
-                pid=SITE_NODE_ID,
-                type="region",
+                uid=uid,
+                parent=SITE_UID,
+                level="region",
                 geom=Geometry(type="polygon", frame="WGS", coords=ring),
                 refs=[
                     SourceRef(
@@ -133,7 +135,7 @@ def build_scene_graph(
         total=len(graph.nodes),
         disable=not show_progress,
     ):
-        if node.type != "site" and node.refs:
+        if node.level != "site" and node.refs:
             node.refs[0].metadata = context_tags(osm_tags(node))
         ring = [(float(r[0]), float(r[1])) for r in node.geom.coords]
         enu = np.array([[*frame.wgs2enu(lat, lon), 0.0] for lat, lon in ring], dtype=np.float64)

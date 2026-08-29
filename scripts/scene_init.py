@@ -48,11 +48,11 @@ def save_phase1_artifacts(
     graph.to_json(paths.scene_graph)
     scene.nav.to_json(paths.nav_graph)
     save_annotations(paths.annotations, graph)
-    outdoor = sum(1 for n in graph.nodes if n.type == "region")
-    buildings = sum(1 for n in graph.nodes if n.type == "structure")
+    outdoor = sum(1 for n in graph.nodes if n.level == "region")
+    buildings = sum(1 for n in graph.nodes if n.level == "structure")
     meta = {
         "run_id": paths.run_id,
-        "site_node_id": site.id if site else None,
+        "site_node_id": site.uid if site else None,
         "emb_model_id": graph.emb_model_id,
         "vlm_model_id": graph.vlm_model_id,
         "raw_dir": str(paths.raw),
@@ -62,7 +62,7 @@ def save_phase1_artifacts(
             "outdoor_zones": outdoor,
             "buildings": buildings,
             "hierarchy_nodes": len(graph.nodes),
-            "site_children": sum(1 for n in graph.nodes if n.pid == site.id) if site else 0,
+            "site_children": sum(1 for n in graph.nodes if n.parent == site.uid) if site else 0,
             "nav_nodes": len(scene.nav.nodes),
             "nav_edges": len(scene.nav.edges),
         },

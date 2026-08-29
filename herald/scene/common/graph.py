@@ -14,113 +14,85 @@ from pathlib import Path
 from typing import Any, Literal
 
 from herald.scene.common.geometry import Geometry
+from herald.scene.common.source import SourceRef
 
-NodeType = Literal[
-    "site",
-    "zone",
-    "region",
-    "structure",
-    "floor",
-    "space",
-    "object",
-    "portal",
+NodeLevel = Literal[
+    "site", "zone", "region", "structure", "floor", "space",
+    "area", "object", "portal", "ego",
 ]
 EdgeType = Literal["contains", "spatial"]
 
 
 @dataclass
-class SourceRef:
-    assigned_by: str
-    assigned_id: str
-    metadata: dict[str, Any] = field(default_factory=dict)
+class SceneNode:
+    uid: int
+    level: NodeLevel
+    parent: int | None = None
+    children: list[int] = field(default_factory=list)
+    geom: Geometry | None = None
+    votes: dict[str, int] = field(default_factory=dict)
+    name: str = ""
+    desc: str = ""
+    supp: int = 0
+    conf: float = 0.0
+    refs: list[SourceRef] = field(default_factory=list)
+    txt_embedding_ref: str | None = None
+    img_embedding_ref: str | None = None
+    attrs: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "assigned_by": self.assigned_by,
-            "assigned_id": self.assigned_id,
-            "metadata": self.metadata,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> SourceRef:
-        return cls(
-            assigned_by=data["assigned_by"],
-            assigned_id=data["assigned_id"],
-            metadata=dict(data.get("metadata") or {}),
-        )
-
-
-@dataclass
-class SceneNode:
-    id: str
-    pid: str | None
-    type: NodeType
-    geom: Geometry
-    refs: list[SourceRef] = field(default_factory=list)
-    observation_count: int = 0
-    name: str = ""
-    desc: str = ""
-    role: str = ""
-    category: str = ""
-    function: str = ""
-    txt_embedding_ref: str | None = None
-    viz_embedding_ref: str | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "id": self.id,
-            "pid": self.pid,
-            "type": self.type,
-            "geom": self.geom.to_dict(),
-            "refs": [ref.to_dict() for ref in self.refs],
-            "observation_count": self.observation_count,
+            "uid": self.uid,
+            "level": self.level,
+            "parent": self.parent,
+            "children": list(self.children),
+            "geom": self.geom.to_dict() if self.geom is not None else None,
+            "votes": dict(self.votes),
             "name": self.name,
             "desc": self.desc,
-            "role": self.role,
-            "category": self.category,
-            "function": self.function,
+            "supp": self.supp,
+            "conf": self.conf,
+            "refs": [r.to_dict() for r in self.refs],
+            "txt_embedding_ref": self.txt_embedding_ref,
+            "img_embedding_ref": self.img_embedding_ref,
+            "attrs": self.attrs,
         }
-        if self.txt_embedding_ref is not None:  payload["txt_embedding_ref"] = self.txt_embedding_ref
-        if self.viz_embedding_ref is not None:  payload["viz_embedding_ref"] = self.viz_embedding_ref
-        return payload
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SceneNode:
+        geom = data.get("geom")
         return cls(
-            id=data["id"],
-            type=data["type"],
-            pid=data.get("pid"),
-            geom=Geometry.from_dict(data["geom"]),
-            refs=[SourceRef.from_dict(r) for r in data.get("refs", [])],
-            observation_count=int(data.get("observation_count", 0)),
+            uid=int(data["uid"]),
+            level=data["level"],
+            parent=data.get("parent"),
+            children=[int(c) for c in data.get("children", [])],
+            geom=Geometry.from_dict(geom) if geom is not None else None,
+            votes={str(k): int(v) for k, v in dict(data.get("votes") or {}).items()},
             name=str(data.get("name") or ""),
             desc=str(data.get("desc") or ""),
-            role=str(data.get("role") or ""),
-            category=str(data.get("category") or ""),
-            function=str(data.get("function") or ""),
+            supp=int(data.get("supp", 0)),
+            conf=float(data.get("conf", 0.0)),
+            refs=[SourceRef.from_dict(r) for r in data.get("refs", [])],
             txt_embedding_ref=data.get("txt_embedding_ref"),
-            viz_embedding_ref=data.get("viz_embedding_ref"),
+            img_embedding_ref=data.get("img_embedding_ref"),
+            attrs=dict(data.get("attrs") or {}),
         )
 
 
 @dataclass
 class SceneEdge:
-    source_id: str
-    target_id: str
+    source: int
+    target: int
     edge_type: EdgeType = "contains"
 
-    def to_dict(self) -> dict[str, str]:
-        return {
-            "source_id": self.source_id,
-            "target_id": self.target_id,
-            "edge_type": self.edge_type,
-        }
+    def to_dict(self) -> dict[str, Any]:
+        return {"source": self.source, "target": self.target, "edge_type": self.edge_type}
 
     @classmethod
-    def from_dict(cls, data: dict[str, str]) -> SceneEdge:
+    def from_dict(cls, data: dict[str, Any]) -> SceneEdge:
         return cls(
-            source_id=data["source_id"],
-            target_id=data["target_id"],
+            source=int(data["source"]),
+            target=int(data["target"]),
             edge_type=data.get("edge_type", "contains"),
         )
 
@@ -131,33 +103,23 @@ class SceneGraph:
     vlm_model_id: str = ""
     nodes: list[SceneNode] = field(default_factory=list)
     edges: list[SceneEdge] = field(default_factory=list)
-    _by_id: dict[str, SceneNode] = field(default_factory=dict, repr=False)
+    _by_uid: dict[int, SceneNode] = field(default_factory=dict, repr=False)
 
     def add_node(self, node: SceneNode) -> None:
-        if node.id in self._by_id:
-            raise ValueError(f"duplicate node id: {node.id!r}")
+        if node.uid in self._by_uid:
+            raise ValueError(f"duplicate node uid: {node.uid!r}")
         self.nodes.append(node)
-        self._by_id[node.id] = node
+        self._by_uid[node.uid] = node
 
-    def add_edge(
-        self,
-        source_id: str,
-        target_id: str,
-        *,
-        edge_type: EdgeType = "contains",
-    ) -> None:
-        self.edges.append(SceneEdge(
-            source_id=source_id,
-            target_id=target_id,
-            edge_type=edge_type
-        ))
+    def add_edge(self, source: int, target: int, *, edge_type: EdgeType = "contains") -> None:
+        self.edges.append(SceneEdge(source=source, target=target, edge_type=edge_type))
 
-    def get_node(self, node_id: str) -> SceneNode | None:
-        return self._by_id.get(node_id)
+    def get_node(self, uid: int) -> SceneNode | None:
+        return self._by_uid.get(uid)
 
     def site_node(self) -> SceneNode | None:
         for node in self.nodes:
-            if node.type == "site":
+            if node.level == "site":
                 return node
         return None
 
@@ -179,8 +141,7 @@ class SceneGraph:
         graph.edges = [SceneEdge.from_dict(e) for e in data.get("edges", [])]
 
         for node in graph.nodes:
-            graph._by_id[node.id] = node
-        
+            graph._by_uid[node.uid] = node
         return graph
 
     def to_json(self, path: Path | str) -> None:

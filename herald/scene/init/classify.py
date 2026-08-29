@@ -294,8 +294,8 @@ def build_feat(
             raise ValueError("mosaic_bbox is required when using VLM classification")
 
     for node in iter_progress(graph.nodes, desc="Classifying polygons", total=len(graph.nodes), disable=not show_progress):
-        if node.type == "site":
-            node.role, node.category, node.function = "site", "ground_other", "none"
+        if node.level == "site":
+            node.attrs.update(role="site", category="ground_other", function="none")
             node.desc = f"site at ({frame.lat:.5f}, {frame.lon:.5f})"
             continue
 
@@ -314,9 +314,7 @@ def build_feat(
             item = _classify(client, views, ctx, tags)
         else:
             item = _fallback(tags)
-        node.role = item.role
-        node.type = "structure" if item.role == "structure" else "region"
-        node.category = item.category
-        node.function = item.function
+        node.level = "structure" if item.role == "structure" else "region"
+        node.attrs.update(role=item.role, category=item.category, function=item.function)
         node.name = item.name
         node.desc = item.desc

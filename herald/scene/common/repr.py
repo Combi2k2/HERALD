@@ -9,16 +9,16 @@ from typing import Any
 
 from herald.scene.common.geometry import Frame
 from herald.scene.common.graph import SceneGraph
-from herald.scene.common.nav import NavGraph
+from herald.scene.common.route import RouteGraph
 
 
 @dataclass
 class SceneRepr:
-    """Shared site frame, semantic scene graph, and navigation graph."""
+    """Shared site frame, semantic scene graph, and route graph."""
 
     frame: Frame
     graph: SceneGraph
-    nav: NavGraph
+    nav: RouteGraph
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -32,7 +32,7 @@ class SceneRepr:
         return cls(
             frame=Frame.from_dict(data["frame"]),
             graph=SceneGraph.from_dict(data["graph"]),
-            nav=NavGraph.from_dict(data["nav"]),
+            nav=RouteGraph.from_dict(data["nav"]),
         )
 
     def to_json(self, path: Path | str) -> None:

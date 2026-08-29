@@ -78,7 +78,7 @@ def _children(graph) -> dict[str, list[str]]:
     out: dict[str, list[str]] = {}
     for e in graph.edges:
         if e.edge_type == "contains":
-            out.setdefault(e.source_id, []).append(e.target_id)
+            out.setdefault(e.source, []).append(e.target)
     return out
 
 
@@ -92,11 +92,11 @@ def _dist_to_leaf(node_id: str, tree: dict[str, list[str]], cache: dict[str, int
 
 
 def semantic_color(node: SceneNode) -> list[int]:
-    if node.category in CATEGORY_COLORS:
-        return list(CATEGORY_COLORS[node.category])
-    if node.role in ROLE_COLORS:
-        return list(ROLE_COLORS[node.role])
-    return list(CATEGORY_COLORS["building" if node.type == "structure" else "unknown"])
+    if node.attrs.get("category") in CATEGORY_COLORS:
+        return list(CATEGORY_COLORS[node.attrs["category"]])
+    if node.attrs.get("role") in ROLE_COLORS:
+        return list(ROLE_COLORS[node.attrs["role"]])
+    return list(CATEGORY_COLORS["building" if node.level == "structure" else "unknown"])
 
 
 def hierarchy_color(dist: int) -> list[int]:
@@ -115,26 +115,26 @@ def render_scene(scene, *, spawn: bool = True, static: bool = True) -> None:
     lw = rr.Radius.ui_points(_LINE_SCENE)
 
     for node in scene.graph.nodes:
-        if node.type == "site" or node.geom.type != "polygon":
+        if node.level == "site" or node.geom.type != "polygon":
             continue
         strip = [_pt(x, y) for x, y in _ring(_xy(scene.frame, node.geom))]
         if len(strip) < 3:
             continue
         for x, y, _ in strip:
             span = max(span, abs(x), abs(y), 1.0)
-        dist = _dist_to_leaf(node.id, tree, dist_cache)
+        dist = _dist_to_leaf(node.uid, tree, dist_cache)
         attrs = dict(
-            id=node.id,
-            type=node.type,
-            role=node.role or "",
-            category=node.category or "",
+            uid=node.uid,
+            level=node.level,
+            role=node.attrs.get("role", ""),
+            category=node.attrs.get("category", ""),
             max_distance_to_leaf=dist,
         )
         for layer, rgb in (
             ("semantic", semantic_color(node)),
             ("hierarchy", hierarchy_color(dist)),
         ):
-            base = f"{layer}/{node.id}"
+            base = f"{layer}/{node.uid}"
             rr.log(base, rr.LineStrips3D([strip], colors=[_rgba(rgb)], radii=[lw]), static=static)
             rr.log(f"{base}/attrs", rr.AnyValues(**attrs), static=static)
 

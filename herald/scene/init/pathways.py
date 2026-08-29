@@ -6,8 +6,8 @@ import math
 from dataclasses import dataclass
 
 from herald.scene.common.geometry import Frame
-from herald.scene.common.graph import SourceRef
-from herald.scene.common.nav import NavGraph, NavNode
+from herald.scene.common.source import SourceRef
+from herald.scene.common.route import RouteEdge, RouteGraph, RouteNode
 from services.osm import OSMFeature
 
 WALKABLE_HIGHWAY_TYPES = frozenset(
@@ -20,10 +20,10 @@ class PathConfig:
     """Hyperparameters for nav-graph construction (distances in metres)."""
 
     edge_length: float = 10.0
-    """Maximum spacing between consecutive NavNodes along a linestring."""
+    """Maximum spacing between consecutive RouteNodes along a linestring."""
 
     snap_radius: float = 2.0
-    """NavNodes closer than this are merged into one (links touching paths)."""
+    """RouteNodes closer than this are merged into one (links touching paths)."""
 
 
 def _is_walkable(feature: OSMFeature) -> bool:
@@ -101,14 +101,14 @@ def build_path(
     highways: list[OSMFeature],
     frame: Frame,
     config: PathConfig = PathConfig(),
-) -> NavGraph:
+) -> RouteGraph:
     """Build a navigation graph from walkable OSM highways.
 
     Pipeline:
     1. Keep only walkable linestrings (``_is_walkable``).
     2. Project each to ENU metres and densify it into samples no more than
        ``config.edge_length`` apart, so every endpoint and interior sample
-       becomes a NavNode and consecutive samples form an edge.
+       becomes a RouteNode and consecutive samples form an edge.
     3. Merge samples within ``config.snap_radius`` so linestrings meeting at a
        junction share one node, yielding a connected routing graph.
 
@@ -130,18 +130,11 @@ def build_path(
             if a != b:
                 edges.add((a, b) if a < b else (b, a))
 
-    graph = NavGraph()
-    for index, pos in enumerate(grid.positions):
-        refs = [SourceRef(assigned_by="osm", assigned_id=r) for r in sorted(node_refs.get(index, ()))]
-        graph.add_node(NavNode(id=_node_id(index), pos=pos, refs=refs))
-    
-    for a, b in sorted(edges):
-        (ax, ay) = grid.positions[a]
-        (bx, by) = grid.positions[b]
-        graph.add_edge(
-            _node_id(a),
-            _node_id(b),
-            length=math.hypot(bx - ax, by - ay),
-            source="osm",
-        )
-    return graph
+    nodes = [
+        RouteNode(id=_node_id(index), pos=pos,
+                  refs=[SourceRef(assigned_by="osm", assigned_id=r)
+                        for r in sorted(node_refs.get(index, ()))])
+        for index, pos in enumerate(grid.positions)
+    ]
+    route_edges = [RouteEdge(_node_id(a), _node_id(b), "osm") for a, b in sorted(edges)]
+    return RouteGraph(nodes, route_edges)

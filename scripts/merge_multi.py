@@ -21,7 +21,7 @@ import numpy as np
 from herald.scene.recon.types import SessionResult
 from herald.scene.recon.utils import SceneCloud, object_crops, write_ply
 from herald.scene.refine import (
-    align, load_meta, load_session, reconcile, save_session, transform_object)
+    align, load_meta, load_session, overlap_merge, reconcile, save_session, transform_object)
 
 # per-source base colours (RGB); blended by averaging for multi-source (fused) objects
 BASE = [(230, 60, 60), (60, 200, 60), (70, 110, 255),
@@ -40,6 +40,11 @@ def main():
     p.add_argument("--sessions", nargs="+", required=True, type=Path, help="session .npz dumps")
     p.add_argument("--ios-trust", type=float, default=0.9, help="pass 1: IoS to fuse regardless of label")
     p.add_argument("--cdiag-gate", type=float, default=0.5, help="pass 2: centre-dist/diag co-location gate")
+    p.add_argument("--overlap-ios", type=float, default=0.5,
+                   help="final dedup pass: fuse ANY remaining pair with OBB IoS >= this "
+                        "(label/session-agnostic; catches intra-session + label-disagreeing overlaps; 0 disables)")
+    p.add_argument("--no-align", action="store_true",
+                   help="skip Sim3 align, use identity (TartanGround global poses are pre-registered)")
     p.add_argument("--voxel", type=float, default=0.1, help="merged-cloud voxel (m)")
     p.add_argument("--device", default="cuda")
     p.add_argument("--out", type=Path, required=True, help="merged map .npz")
@@ -66,15 +71,24 @@ def main():
     M = objs0                                                # canonical (session-0 frame)
     for i in range(1, len(maps)):
         objs_i, pts_i, cols_i = maps[i]
-        A = align(pts_i, pts0, yaw_seeds=24, iters=80, record=False, device=args.device, verbose=True)
-        T = A.transform
-        print(f"align {sids[i]}->{sids[0]}: scale={T.s:.4f} yaw={np.degrees(A.yaw):.2f}deg "
-              f"inliers={A.inlier_frac:.2%}", flush=True)
-        objs_i_t = [transform_object(o, T) for o in objs_i]
+        if args.no_align:                                    # global poses already co-registered
+            objs_i_t, pts_i_t = objs_i, pts_i
+        else:
+            A = align(pts_i, pts0, yaw_seeds=24, iters=80, record=False, device=args.device, verbose=True)
+            T = A.transform
+            print(f"align {sids[i]}->{sids[0]}: scale={T.s:.4f} yaw={np.degrees(A.yaw):.2f}deg "
+                  f"inliers={A.inlier_frac:.2%}", flush=True)
+            objs_i_t = [transform_object(o, T) for o in objs_i]
+            pts_i_t = T.apply(pts_i)
         rec = reconcile(M, objs_i_t, ios_trust=args.ios_trust, cdiag_gate=args.cdiag_gate)
         M = rec["merged"]
-        scene.add(T.apply(pts_i), cols_i)
+        scene.add(pts_i_t, cols_i)
         print(f"  + {sids[i]}: {len(rec['matched'])} fused this step -> {len(M)} persistent objects", flush=True)
+
+    if args.overlap_ios > 0:                                 # final label-agnostic dedup (in-merge)
+        n_before = len(M)
+        M = overlap_merge(M, ios_thr=args.overlap_ios)
+        print(f"overlap-dedup (ios>={args.overlap_ios}): {n_before} -> {len(M)} objects", flush=True)
 
     if args.embed:                                           # text-label embedding (vote-weighted mean)
         try:

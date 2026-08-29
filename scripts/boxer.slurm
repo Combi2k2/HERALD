@@ -30,6 +30,7 @@ MIN_OBS=${MIN_OBS:-4}
 MAX_DEPTH=${MAX_DEPTH:-60.0}
 CORRIDOR_STEP=${CORRIDOR_STEP:-0.2}
 MAX_RANGE=${MAX_RANGE:-15.0}
+MIN_VISIBLE=${MIN_VISIBLE:-0.0}
 
 RUN_DIR=$REPO/runs/${SLURM_JOB_ID:-manual}
 mkdir -p "$RUN_DIR"
@@ -41,7 +42,7 @@ export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-4}
 
 echo "=================================================================="
 echo "job:      ${SLURM_JOB_ID:-manual} on $(hostname)   $(date -Is)"
-echo "target:   $ENV_NAME/$TRAJ/$CAMERA  max=$MAX_FRAMES conf2d=$CONF_THR2D conf3d=$CONF_THR3D iou=$IOU_THR"
+echo "target:   $ENV_NAME/$TRAJ/$CAMERA  max=$MAX_FRAMES conf2d=$CONF_THR2D conf3d=$CONF_THR3D iou=$IOU_THR min_obs=$MIN_OBS range=$MAX_RANGE vis=$MIN_VISIBLE"
 nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader || echo "no nvidia-smi"
 echo "=================================================================="
 
@@ -58,7 +59,7 @@ DUMP_ARG=""
     --conf-thr2d "$CONF_THR2D" \
     --conf-thr3d "$CONF_THR3D" --iou-thr "$IOU_THR" --min-obs "$MIN_OBS" \
     --max-depth "$MAX_DEPTH" --corridor-step "$CORRIDOR_STEP" \
-    --max-range "$MAX_RANGE" \
+    --max-range "$MAX_RANGE" --min-visible "$MIN_VISIBLE" \
     --device cuda --out "$RRD" $DUMP_ARG
 
 echo "------------------------------------------------------------------"

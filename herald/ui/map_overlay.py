@@ -169,8 +169,8 @@ def _overlay_layers_payload(
         outdoor_features = []
         building_features = []
         for node in graph.nodes:
-            popup = html.escape(node.desc or node.name or node.id)
-            if node.type == "region":
+            popup = html.escape(node.desc or node.name or str(node.uid))
+            if node.level == "region":
                 if node.geom.frame == "ENU":
                     if frame is None:
                         raise ValueError("frame is required to map ENU scene graph geometry")
@@ -183,7 +183,7 @@ def _overlay_layers_payload(
                 outdoor_features.append(
                     _geojson_polygon_feature(ring, popup=popup)
                 )
-            elif node.type == "structure":
+            elif node.level == "structure":
                 if node.geom.frame == "ENU":
                     if frame is None:
                         raise ValueError("frame is required to map ENU scene graph geometry")
