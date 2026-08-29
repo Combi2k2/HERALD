@@ -97,20 +97,22 @@ def _mergeable(a: SceneObject, b: SceneObject, ios: float, cdiag: float, *,
 
 def _merge_sessions(objs: list[SceneObject]) -> dict:
     """Union the per-session provenance of a cluster: session_id -> {support, conf, track_id,
-    crops}. Crop refs concatenate; support sums and conf maxes if the same session appears
-    twice (rare, via A-A bridging)."""
+    crops, frames}. Crop refs and observing-frame indices concatenate; support sums and conf
+    maxes if the same session appears twice (rare, via A-A bridging)."""
     out: dict = {}
     for o in objs:
         for sid, rec in o.sessions.items():
             crops = list(rec.get("crops", []))
+            frames = list(rec.get("frames", []))
             if sid in out:
                 out[sid] = {"support": out[sid]["support"] + int(rec["support"]),
                             "conf": max(out[sid]["conf"], float(rec["conf"])),
                             "track_id": out[sid]["track_id"],
-                            "crops": out[sid]["crops"] + crops}
+                            "crops": out[sid]["crops"] + crops,
+                            "frames": sorted(set(out[sid]["frames"]) | set(frames))}
             else:
                 out[sid] = {"support": int(rec["support"]), "conf": float(rec["conf"]),
-                            "track_id": int(rec["track_id"]), "crops": crops}
+                            "track_id": int(rec["track_id"]), "crops": crops, "frames": frames}
     return out
 
 
@@ -157,6 +159,40 @@ class _DSU:
         ra, rb = self.find(a), self.find(b)
         if ra != rb:
             self.p[rb] = ra
+
+
+# --------------------------------------------------------------------------- overlap merge
+
+def overlap_merge(objects: list[SceneObject], *, ios_thr: float = 0.5) -> list[SceneObject]:
+    """Final label-agnostic dedup pass over an already-merged object set: fuse ANY pair of
+    boxes whose OBB IoS (intersection / smaller-box volume) >= `ios_thr`, regardless of session
+    or label, collapsing connected components with the same union-find + `_fuse_many` as
+    `reconcile`. `reconcile` only adds cross-session, label-gated edges, so it leaves two kinds
+    of duplicate behind that this catches: intra-session survivors the tracker never merged, and
+    cross-session overlaps whose labels disagree. The fused object keeps the smallest uid in its
+    group (the canonical A id, when present). `ios_thr <= 0` disables the pass (returns as-is)."""
+    n = len(objects)
+    if n < 2 or ios_thr <= 0:
+        return list(objects)
+    R = [quat_to_R(o.quat_xyzw) for o in objects]
+    C = np.array([o.center for o in objects], np.float64).reshape(n, 3)
+    H = [np.asarray(o.half_size, np.float64).reshape(3) for o in objects]
+    diag = np.array([2.0 * np.linalg.norm(h) for h in H])
+    dsu = _DSU(n)
+    for i in range(n):
+        for j in range(i + 1, n):
+            if float(np.linalg.norm(C[i] - C[j])) > 0.5 * (diag[i] + diag[j]):
+                continue                                             # too far to overlap meaningfully
+            if obb_ios(C[i], H[i], R[i], C[j], H[j], R[j]) >= ios_thr:
+                dsu.union(i, j)
+    groups: dict = defaultdict(list)
+    for i in range(n):
+        groups[dsu.find(i)].append(i)
+    out = []
+    for members in groups.values():
+        objs = [objects[m] for m in members]
+        out.append(_fuse_many(objs, uid=min(o.uid for o in objs)))
+    return out
 
 
 # --------------------------------------------------------------------------- reconcile

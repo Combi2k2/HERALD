@@ -11,15 +11,15 @@ from services.osm import OSMRawPolygon
 
 def annotations_from_graph(graph: SceneGraph) -> dict:
     return {
-        node.id: {
-            "role": node.role,
-            "category": node.category,
-            "function": node.function,
+        node.uid: {
+            "role": node.attrs.get("role", ""),
+            "category": node.attrs.get("category", ""),
+            "function": node.attrs.get("function", ""),
             "name": node.name,
             "description": node.desc,
         }
-        for node in sorted(graph.nodes, key=lambda n: n.id)
-        if node.role
+        for node in sorted(graph.nodes, key=lambda n: n.uid)
+        if node.attrs.get("role")
     }
 
 

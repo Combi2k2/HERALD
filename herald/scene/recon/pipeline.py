@@ -48,7 +48,8 @@ def _scene_object(o: dict, session_id: str) -> SceneObject:
                        quat_xyzw=o["quat_xyzw"], label=o["label"], labels=dict(o["labels"]),
                        conf=conf, support=support,
                        sessions={session_id: {"support": support, "conf": conf, "track_id": tid,
-                                              "crops": list(o.get("crop_refs", []))}},
+                                              "crops": list(o.get("crop_refs", [])),
+                                              "frames": list(o.get("frames", []))}},
                        embedding=None)
 
 

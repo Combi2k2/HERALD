@@ -36,7 +36,7 @@ def build_tree(
         poly = Polygon(ring)
         area = float(poly.area)
 
-        if node.type != "site":
+        if node.level != "site":
             if area < min_area: continue
             if area > max_area: continue
 
@@ -59,9 +59,9 @@ def build_tree(
                 best_pid = pid
 
         if best_pid is not None:
-            graph.nodes[id].pid = graph.nodes[best_pid].id
+            graph.nodes[id].parent = graph.nodes[best_pid].uid
             graph.edges.append(SceneEdge(
-                graph.nodes[best_pid].id,
-                graph.nodes[id].id,
+                graph.nodes[best_pid].uid,
+                graph.nodes[id].uid,
                 "contains"
             ))

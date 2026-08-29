@@ -1,10 +1,9 @@
-"""The unified scene data structure, shared by Tier-1 recon and Tier-2 merge.
+"""Scene map for Tier-1 recon and Tier-2 merge: a coloured point cloud + object nodes.
 
-A per-video reconstruction (a "session") and a merged multi-session persistent map are the
-SAME structure -- `SceneMap` (points + colours + `SceneObject`s). Tier-2 consumes a
-`SceneMap`, never raw frames; `SessionResult` is an alias used at the Tier-1 output boundary.
-Poses/points are in the TartanGround NED world frame (same frame Boxer objects come back in).
-"""
+An object is a `SceneNode` (level="object"): OBB geometry in `geom`, label votes in `votes`,
+evidence in `supp`/`conf`, and one `SourceRef` per contributing session in `refs`. `SceneObject`
+is a thin constructor/accessor over `SceneNode` that keeps the recon/merge code's field names
+(center/half_size/quat_xyzw/label/labels/support/sessions/embedding)."""
 
 from __future__ import annotations
 
@@ -12,56 +11,67 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from herald.scene.common.geometry import Geometry
+from herald.scene.common.graph import SceneNode
+from herald.scene.common.source import SourceRef
 
-@dataclass
-class SceneObject:
-    """One object in a scene map -- the single record used by both per-session recon and the
-    merged persistent map. Geometry is an oriented box (OBB) in the NED world frame."""
 
-    # --- identity: stable within a map, preserved across merges. NOT the per-video track id
-    #     (that lives in `sessions` as provenance, since it is unique only within one session)
-    uid: int
+class SceneObject(SceneNode):
+    """A SceneNode(level="object") built from recon fields; provenance goes to `refs` (one
+    SourceRef per session: assigned_by=session id, assigned_id=track id, crops/frames in metadata)."""
 
-    # --- 3D OBB ---
-    center: np.ndarray           # (3,)
-    half_size: np.ndarray        # (3,) half-extents
-    quat_xyzw: np.ndarray        # (4,)
+    def __init__(self, uid, center, half_size, quat_xyzw, label, labels,
+                 conf=0.0, support=0, sessions=None, embedding=None):
+        refs = [SourceRef(assigned_by=str(sid), assigned_id=str(p.get("track_id")),
+                          supp=int(p.get("support", 0)), conf=float(p.get("conf", 0.0)),
+                          metadata={"crops": [[int(f), [float(v) for v in b]] for f, b in p.get("crops", [])],
+                                    "frames": [int(x) for x in p.get("frames", [])]})
+                for sid, p in (sessions or {}).items()]
+        super().__init__(uid=int(uid), level="object",
+                         geom=Geometry(type="obb", frame="NED", offset=center,
+                                       half_size=half_size, quat_xyzw=quat_xyzw),
+                         votes=dict(labels), name=label, supp=int(support), conf=float(conf), refs=refs)
+        self.embedding = embedding
 
-    # --- semantics ---
-    label: str                   # top-voted label
-    labels: dict                 # label -> vote count (fused across observations)
+    @property
+    def center(self) -> np.ndarray:
+        return np.asarray(self.geom.offset, np.float32)
 
-    # --- evidence ---
-    conf: float = 0.0            # fused detection confidence, (score2d + score3d)/2 in [0,1]
-    support: int = 0             # total observations (frames) across all contributing sessions
+    @property
+    def half_size(self) -> np.ndarray:
+        return np.asarray(self.geom.half_size, np.float32)
 
-    # --- provenance (per contributing session) ---
-    #     session_id -> {"support": int, "conf": float, "track_id": int,
-    #                    "crops": [(frame_id, box_xyxy), ...]}
-    #     grows as sessions are merged in -> the evidence a Tier-2 retire will reason over.
-    #     The `crops` are lightweight render-only references (frame index + 2D box), NOT
-    #     pixels -- resolved against `SceneMap.meta["sources"][session_id]` (a path) at
-    #     render time; nothing in the processing pipeline reads them.
-    sessions: dict = field(default_factory=dict)
+    @property
+    def quat_xyzw(self) -> np.ndarray:
+        return np.asarray(self.geom.quat_xyzw, np.float32)
 
-    # --- features ---
-    embedding: np.ndarray | None = None        # (D,) visual-semantic embedding; None until computed
+    @property
+    def label(self) -> str:
+        return self.name
+
+    @property
+    def labels(self) -> dict:
+        return self.votes
+
+    @property
+    def support(self) -> int:
+        return self.supp
+
+    @property
+    def sessions(self) -> dict:
+        return {r.assigned_by: {"support": r.supp, "conf": r.conf,
+                                "track_id": int(r.assigned_id) if r.assigned_id not in (None, "None") else None,
+                                "crops": r.metadata.get("crops", []), "frames": r.metadata.get("frames", [])}
+                for r in self.refs}
 
 
 @dataclass
 class SceneMap:
-    """A scene: coloured point cloud + object OBBs. One video's recon and a merged
-    multi-session map are the same type -- the firewall Tier-2 consumes. `dynamic` keeps the
-    filtered-out movers (for viz/analysis, not dropped). `meta` carries map-level bookkeeping
-    such as the contributing session ids."""
-
-    points: np.ndarray           # (N,3) scene cloud
-    colors: np.ndarray           # (N,3) uint8
-    objects: list                # list[SceneObject]
-    dynamic: list = field(default_factory=list)   # filtered-out movers
-    meta: dict = field(default_factory=dict)      # {"sessions": [...], "sources": {sid: path}} -- `sources`
-                                                  # maps a session id to its frames-folder/video path (crop refs)
+    points: np.ndarray
+    colors: np.ndarray
+    objects: list                                 # list[SceneObject]
+    dynamic: list = field(default_factory=list)
+    meta: dict = field(default_factory=dict)
 
 
-# Tier-1 output boundary name (a single session's reconstruction is just a SceneMap).
 SessionResult = SceneMap

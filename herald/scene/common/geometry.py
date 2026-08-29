@@ -12,8 +12,8 @@ from pyproj import Transformer
 
 from herald.data.paths import FRAME_JSON
 
-GeometryType = Literal["point", "polyline", "polygon"]
-GeometryFrame = Literal["ENU", "WGS", "UTM"]
+GeometryType = Literal["point", "polyline", "polygon", "obb"]
+GeometryFrame = Literal["ENU", "WGS", "UTM", "NED"]
 
 
 def _utm_crs(lat: float, lon: float) -> str:
@@ -140,7 +140,9 @@ class Geometry:
     type: GeometryType
     frame: GeometryFrame = "ENU"
     coords: list[Vec3] = field(default_factory=lambda: [Vec3.zeros()])
-    offset: Vec3 = field(default_factory=Vec3.zeros)
+    offset: Vec3 = field(default_factory=Vec3.zeros)     # obb: box centre
+    half_size: Vec3 | None = None
+    quat_xyzw: Vec4 | None = None
 
     def __post_init__(self) -> None:
         self.coords = np.asarray(self.coords, dtype=np.float64)
@@ -149,34 +151,37 @@ class Geometry:
         if self.coords.ndim != 2 or self.coords.shape[1] != 3:
             raise ValueError("coords must have shape (N, 3)")
         self.offset = Vec3(self.offset)
+        if self.half_size is not None:
+            self.half_size = Vec3(self.half_size)
+        if self.quat_xyzw is not None:
+            self.quat_xyzw = Vec4(self.quat_xyzw)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "type": self.type,
             "frame": self.frame,
             "coords": self.coords.tolist(),
             "offset": self.offset.tolist(),
         }
+        if self.half_size is not None:
+            d["half_size"] = self.half_size.tolist()
+        if self.quat_xyzw is not None:
+            d["quat_xyzw"] = self.quat_xyzw.tolist()
+        return d
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Geometry:
-        geom_type = data.get("type")
-        geom_frame = data.get("frame")
-
-        coords = [
-            [
-                float(p[0]),
-                float(p[1]),
-                float(p[2] if len(p) == 3 else 0.0),
-            ]
-            for p in data.get("coords", [[0.0, 0.0, 0.0]])
-        ]
-
+        coords = [[float(p[0]), float(p[1]), float(p[2] if len(p) == 3 else 0.0)]
+                  for p in data.get("coords", [[0.0, 0.0, 0.0]])]
+        hs = data.get("half_size")
+        q = data.get("quat_xyzw")
         return cls(
-            type=geom_type,
-            frame=geom_frame,
+            type=data.get("type"),
+            frame=data.get("frame"),
             coords=np.array(coords, dtype=np.float64),
             offset=Vec3(data.get("offset", [0.0, 0.0, 0.0])),
+            half_size=Vec3(hs) if hs is not None else None,
+            quat_xyzw=Vec4(q) if q is not None else None,
         )
 
 

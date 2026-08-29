@@ -242,3 +242,6 @@ Untitled*.ipynb
 # Everything else under third_party/ is ignored.
 /third_party/*
 !/third_party/boxer
+
+# Experiment outputs (local only; code + idea.md are tracked)
+experiments/*/out/

@@ -10,7 +10,7 @@ from herald.data import FRAME_JSON, RunPaths
 from herald.ui import render_scene
 from herald.scene.common.geometry import Frame
 from herald.scene.common.graph import SceneGraph
-from herald.scene.common.nav import NavGraph
+from herald.scene.common.route import RouteGraph
 from herald.scene.common.repr import SceneRepr
 
 def main() -> None:
@@ -32,7 +32,7 @@ def main() -> None:
         raise SystemExit(1)
 
     graph = SceneGraph.from_json(graph_path)
-    nav = NavGraph.from_json(paths.nav_graph) if paths.nav_graph.is_file() else NavGraph()
+    nav = RouteGraph.from_json(paths.nav_graph) if paths.nav_graph.is_file() else RouteGraph()
     render_scene(SceneRepr(frame=frame, graph=graph, nav=nav), spawn=True)
 
     print(f"Run: {paths.run_id}  nodes: {len(graph.nodes)}  nav: {len(nav.nodes)}")

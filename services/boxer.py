@@ -53,6 +53,17 @@ _CKPT = _BOXER / "ckpts" / "boxernet_hw960in2x6d768-c88128f8.ckpt"
 _R_FIX = np.diag([1.0, -1.0, -1.0]).astype(np.float32)
 
 
+def _quat_xyzw_to_R(q) -> np.ndarray:
+    """Unit quaternion (x,y,z,w) -> 3x3 rotation. (Local copy so this file stays
+    independent of HERALD's evicted `utils`.)"""
+    x, y, z, w = (float(v) for v in q)
+    return np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - z * w),     2 * (x * z + y * w)],
+        [2 * (x * y + z * w),     1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+        [2 * (x * z - y * w),     2 * (y * z + x * w),     1 - 2 * (x * x + y * y)],
+    ], np.float32)
+
+
 class BoxerPipeline:
     """Boxer's complete model behind ``add_frame(rgb, K, c2w, depth)``.
 
@@ -69,7 +80,7 @@ class BoxerPipeline:
 
     def __init__(self, vocab, *, device="cuda", ckpt=_CKPT, conf_thr2d=0.40, conf_thr3d=0.50,
                  iou_thr=0.3, min_obs=4, online=False, n_crops=3, persist=True,
-                 max_range=15.0):
+                 max_range=15.0, min_visible=0.0):
         self.vocab = list(vocab)
         self.device = device
         self.conf_thr2d, self.conf_thr3d, self.iou_thr, self.min_obs = conf_thr2d, conf_thr3d, iou_thr, min_obs
@@ -78,6 +89,10 @@ class BoxerPipeline:
         # in front of the camera that project inside the image and sit within
         # `max_range` metres are trusted enough to associate/merge a track.
         self.max_range = max_range
+        # Truncation gate: a box whose reprojected 3D OBB has less than `min_visible`
+        # of its area inside the frame is a truncated/edge-straddling lift (unreliable
+        # 3D). 0.0 disables it (only the centre-in-frame check above then applies).
+        self.min_visible = min_visible
 
         from owl.owl_wrapper import OwlWrapper
 
@@ -103,6 +118,7 @@ class BoxerPipeline:
             self._tlabels: dict[int, Counter] = defaultdict(Counter)   # track_id -> label counts
             self._trefs: dict[int, list] = defaultdict(list)           # track_id -> [(frame_idx, box_xyxy)]
             self._tseen: dict[int, int] = defaultdict(int)             # track_id -> #refs offered
+            self._tframes: dict[int, set] = defaultdict(set)           # track_id -> {observing frame_idx}
 
             # When Boxer merges two tracks, combine our per-track attachments onto the
             # survivor too (else the absorbed id's data orphans): label votes union,
@@ -117,6 +133,7 @@ class BoxerPipeline:
                 if pool:
                     self._trefs[a] = pool if len(pool) <= self.n_crops else random.sample(pool, self.n_crops)
                 self._tseen[a] = self._tseen.pop(a, 0) + self._tseen.pop(b, 0)
+                self._tframes[a] |= self._tframes.pop(b, set())         # union observing frames
 
             self.tracker._merge_track_pair = _merge_attrs
 
@@ -187,7 +204,8 @@ class BoxerPipeline:
                         "conf": float(np.asarray(t.obb.prob).reshape(-1)[0]),  # fused (score2d+score3d)/2
                         "support": int(t.support_count), "track_id": tid,
                         "label": labs.most_common(1)[0][0], "labels": dict(labs),
-                        "crop_refs": list(self._trefs[tid])})
+                        "crop_refs": list(self._trefs[tid]),
+                        "frames": sorted(self._tframes[tid])})   # all observing frame indices (multi-anchor)
         return out
 
     def _fuse(self) -> list[dict]:
@@ -229,10 +247,11 @@ class BoxerPipeline:
 
     def _quality_gate(self, dets, K, c2w, hw) -> np.ndarray:
         """Boolean keep-mask over `dets`: a box is trusted for the tracker only if its
-        3D centre is in front of the camera and projects inside the image, and it lies
-        within max_range metres. Rejects the low-quality lifts (behind camera /
-        off-image / far) that otherwise seed junk tracks and block clean merges.
-        (Per-detection confidence is already gated upstream by conf_thr2d/conf_thr3d.)"""
+        3D centre is in front of the camera and projects inside the image, it lies
+        within max_range metres, and (when min_visible>0) enough of its reprojected 3D
+        OBB falls inside the frame. Rejects the low-quality lifts (behind camera /
+        off-image / far / truncated) that otherwise seed junk tracks and block clean
+        merges. (Per-detection confidence is already gated upstream by conf_thr*.)"""
         n = len(dets)
         if n == 0:
             return np.zeros(0, bool)
@@ -245,8 +264,39 @@ class BoxerPipeline:
             u = K[0, 0] * cam[:, 0] / z + K[0, 2]
             v = K[1, 1] * cam[:, 1] / z + K[1, 2]
         dist = np.linalg.norm(centers - c2w[:3, 3], axis=1)
-        return ((z > 0) & (dist <= self.max_range)
+        keep = ((z > 0) & (dist <= self.max_range)
                 & (u >= 0) & (u < W) & (v >= 0) & (v < H))
+        if self.min_visible > 0.0:
+            keep &= self._visible_fraction(dets, K, c2w, hw) >= self.min_visible
+        return keep
+
+    def _visible_fraction(self, dets, K, c2w, hw) -> np.ndarray:
+        """Fraction of each det's 3D OBB that reprojects inside the image: area of the
+        frame-clipped projected AABB / area of the full projected AABB. A truncated or
+        edge-straddling box scores low; any OBB corner behind the image plane forces 0
+        (a straddling lift is unreliable). Vectorised over the 8 corners per det."""
+        n = len(dets)
+        c2w = np.asarray(c2w, np.float32)
+        R_cw, t_cw = c2w[:3, :3], c2w[:3, 3]
+        fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
+        H, W = hw
+        signs = np.array([[sx, sy, sz] for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)],
+                         np.float32)                                        # (8,3)
+        frac = np.zeros(n, np.float32)
+        for i in range(n):
+            ctr, quat, half = self._to_ned(dets[i])
+            corners = ctr[None, :] + (signs * half[None, :]) @ _quat_xyzw_to_R(quat).T  # (8,3) world
+            cam = (corners - t_cw) @ R_cw                                   # world -> camera
+            zc = cam[:, 2]
+            if np.any(zc <= 1e-3):
+                continue                                                   # straddles image plane -> 0
+            uu = fx * cam[:, 0] / zc + cx
+            vv = fy * cam[:, 1] / zc + cy
+            u0, u1, v0, v1 = uu.min(), uu.max(), vv.min(), vv.max()
+            full = max(u1 - u0, 1e-6) * max(v1 - v0, 1e-6)
+            clip = max(min(u1, W) - max(u0, 0.0), 0.0) * max(min(v1, H) - max(v0, 0.0), 0.0)
+            frac[i] = clip / full
+        return frac
 
     # --- online attribution: route this frame's labels + crops to tracks by IoU,
     # and report the per-detection track association back to the caller ---
@@ -266,6 +316,7 @@ class BoxerPipeline:
             tid = int(tracks[j].track_id)
             box = np.asarray(boxes2d[di], np.float32)
             self._tlabels[tid][labels[di]] += 1
+            self._tframes[tid].add(int(frame_idx))               # every frame that observed this track
             self._reservoir(tid, (int(frame_idx), box))          # ref this observation (frame + box)
             tids.append(tid); boxes.append(box); centers.append(self._to_ned(dets[di])[0])
         return {"match_tids": np.asarray(tids, np.int64),

@@ -57,62 +57,62 @@ data/{run_id}/
 └── phase1/  scene_graph.json · pathways.geojson · metadata.json
 ```
 
-## Phase 2 — RGB(-D) reconstruction (two-tier)
+## Phase 2 — RGB(-D) reconstruction → persistent map
 
-Tier 1 turns one video into a `SessionResult` (static object OBBs + scene cloud); Tier 2
-reconciles many `SessionResult`s into one persistent map. Tier 2 consumes only the saved
-`SessionResult` dumps — never raw frames.
+Each session's frames become a `SessionResult` (Tier 1: static object OBBs + scene cloud); the
+sessions are then folded one-by-one into a single **persistent `SceneMap` on disk** (Tier 2) and
+objects are clustered into **portal-bounded areas**. Tier 2 consumes only the saved
+`SessionResult` dumps — never raw frames. Each stage is its own `scene_*` script and only writes
+files to disk; **rendering is a separate step**.
 
-### Tier 1 — per-session recon
+The persistent representation lives under `data/tartanground/<Env>/scene/`:
 
-`scripts/session_recon.py` streams frames through the Boxer engine (OWLv2 detect → BoxerNet
-3D lift → online 3D tracker), accumulates the scene cloud, drops in-video movers (corridor
-filter), and dumps a `SessionResult`.
-
-```bash
-# local (GPU):
-uv run python scripts/session_recon.py --env Hospital --traj P0000 \
-    --dump data/tartanground/Hospital/recon/session_P0000.npz \
-    --out runs/session_P0000.rrd
+```
+persistent.npz     accumulating SceneMap (cloud + object OBBs)
+route.json         persistent route graph (nav-node lattice)
+attach.json        object → observing-nav-node attachment
+scene_graph.json   area/object SceneGraph
+sim3_<T>.json      per-session Sim3
 ```
 
-On SLURM, use the `scripts/boxer.slurm` template (pick the entry with `SCRIPT`):
+### Run it
+
+Per session `T`: recon (GPU) → align → track_obj → merge_route (CPU); then area-cluster once.
 
 ```bash
-sbatch --export=ALL,SCRIPT=session_recon.py,ENV_NAME=Hospital,TRAJ=P0000,\
-DUMP=data/tartanground/Hospital/recon/session_P0000.npz scripts/boxer.slurm
+REC=data/tartanground/Hospital/recon ; S=data/tartanground/Hospital/scene
+
+# Tier 1 (GPU): one video -> SessionResult
+uv run python scripts/scene_recon.py --env Hospital --traj P0000 --out $REC/session_P0000.npz
+
+# Tier 2 (CPU): fold the session into the persistent map
+uv run python scripts/scene_align.py     --session $REC/session_P0000.npz --persistent $S/persistent.npz --out $S/sim3_P0000.json --no-align
+uv run python scripts/scene_track_obj.py --session $REC/session_P0000.npz --persistent $S/persistent.npz --sim3 $S/sim3_P0000.json
+uv run python scripts/scene_merge_route.py --objects $S/persistent.npz --route $S/route.json --attach $S/attach.json --session P0000 --sim3 $S/sim3_P0000.json
+
+# after ALL sessions: portal-bounded area clustering (+ optional VLM captions)
+uv run python scripts/scene_area_cluster.py  --objects $S/persistent.npz --route $S/route.json --attach $S/attach.json --out $S/scene_graph.json
+uv run python scripts/scene_area_classify.py --graph $S/scene_graph.json --out $S/scene_graph.json
+
+# render the persistent representation
+uv run python scripts/scene_render.py --objects $S/persistent.npz --graph $S/scene_graph.json --route $S/route.json --out $S/scene.rrd
 ```
 
-Key knobs: `--conf-thr2d` (OWLv2 2D floor, 0.40) · `--conf-thr3d` (BoxerNet 3D floor, 0.50) ·
-`--min-obs` (track support, 4) · `--corridor-step`/`--max-range` (dynamic filter).
-
-### Tier 2 — multi-session merge + persistent embeddings
-
-`merge_multi.py` aligns each session's cloud onto the first (energy-based Sim3), reconciles
-objects (two-pass gate + union-find), and embeds each merged object's text label into a vector
-(vote-weighted mean via a text-only sentence model). Use `merge_objects.py` for a pairwise merge.
+The whole flow (recon on GPU per trajectory → integration on CPU → area-cluster) runs via one job:
 
 ```bash
-uv run python scripts/merge_multi.py \
-    --sessions data/tartanground/Hospital/recon/session_P000{0,1,2}.npz \
-    --out runs/merge/merged.npz                        # + merged.ply / merged.rrd
-
-uv run python scripts/merge_objects.py --a session_P0000.npz --b session_P0001.npz \
-    --out runs/merge/pair.npz                          # pairwise
-
-uv run python scripts/embed_map.py --map runs/merge/merged.npz   # (re)fill embeddings in place
+sbatch --export=ALL,ENV_NAME=Hospital,TRAJS="P0000 P0001 P0002" scripts/scene_pipeline.slurm
 ```
 
-Merged objects render color-coded by source (per session, blended for fused). A merged map is
-the same `SceneMap` structure as a single-session recon, so it can be merged again.
+`--no-align` uses an identity Sim3 — TartanGround global poses are already co-registered; real,
+independently-originated sessions drop it and let `scene_align` recover the Sim3.
 
-### Diagnostics
-
-```bash
-uv run python scripts/test_recon.py  --env Hospital --traj P0000 --max-frames 60   # layered 3D/2D panel
-uv run python scripts/test_align.py  --p1 A.npz --p2 B.npz   # Sim3 recovery on a known perturbation
-uv run python scripts/test_refine.py                        # alignment inspection (synthetic if no --p1/--p2)
-```
+Key knobs — recon: `--conf-thr2d`/`--conf-thr3d` (OWLv2/BoxerNet floors) · `--min-obs` (track
+support) · `--max-range`/`--min-visible` (range + box-visibility gates) · `--corridor-step`
+(dynamic filter). Route: `--spacing` (nav-node spacing) · `--r-connect` (proximity radius).
+Areas: `--d-max` (area diameter cap) · `--linkage` · `--mirror-adj`/`--gate-margin` (portal
+disambiguation). Render: portals are magenta bboxes, doors solid magenta panels, the route graph
+grey with portal-cut edges in red; click any object/door/portal for its crops.
 
 ## Cluster / GPU (SLURM)
 
@@ -126,11 +126,11 @@ uv venv. Login nodes have no usable GPU. Job outputs go to `runs/{jobid}/`.
 ```
 herald/scene/init/     Phase-1 scene-graph builder
 herald/scene/recon/    Tier-1 per-session recon (SessionRecon, corridor, types, utils)
-herald/scene/refine/   Tier-2 multi-session align + reconcile
-herald/scene/common/   shared domain types (SceneGraph, Frame, NavGraph, ...)
+herald/scene/refine/   Tier-2 persistent map: align, reconcile, route, portals
+herald/scene/common/   shared domain types (SceneGraph/SceneNode, RouteGraph, SourceRef, Frame, ...)
 herald/scene/semantic.py   object text-label embeddings
 services/              model/integration wrappers (boxer, vggt, osm, vlm, sam2, embeddings)
-scripts/               entry points + SLURM templates
+scripts/               scene_* entry points + SLURM templates
 third_party/boxer/     Boxer detector/tracker (pinned git submodule)
 ```
 
