@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 import numpy as np
 
@@ -92,9 +92,8 @@ class RouteGraph:
             added += 1
         return added
 
-    def shortest_path(self, a: str, b: str) -> float:
+    def _csr(self):
         from scipy.sparse import csr_matrix
-        from scipy.sparse.csgraph import dijkstra
         idx = {n.id: i for i, n in enumerate(self.nodes)}
         pos = np.array([n.pos for n in self.nodes], np.float32)
         ij = np.array([(idx[e.source_id], idx[e.target_id]) for e in self.edges], np.int64).reshape(-1, 2)
@@ -103,7 +102,98 @@ class RouteGraph:
         cols = np.concatenate([ij[:, 1], ij[:, 0]]) if len(ij) else np.zeros(0, np.int64)
         csr = csr_matrix((np.concatenate([w, w]) if len(w) else np.zeros(0), (rows, cols)),
                          shape=(len(self.nodes), len(self.nodes)))
+        return csr, idx
+
+    def shortest_path(self, a: str, b: str) -> float:
+        from scipy.sparse.csgraph import dijkstra
+        csr, idx = self._csr()
         return float(dijkstra(csr, directed=False, indices=idx[a])[idx[b]])
+
+    def shortest_path_nodes(self, a: str, b: str) -> list[str]:
+        """Node-id path a->b (inclusive), not just its length. Empty list if unreachable."""
+        from scipy.sparse.csgraph import dijkstra
+        csr, idx = self._csr()
+        ai, bi = idx[a], idx[b]
+        dist, pred = dijkstra(csr, directed=False, indices=ai, return_predecessors=True)
+        if not np.isfinite(dist[bi]):
+            return []
+        path = [bi]
+        while path[-1] != ai:
+            path.append(int(pred[path[-1]]))
+        ids = [self.nodes[i].id for i in reversed(path)]
+        return ids
+
+    def nearest_node(self, pos, *, type: RouteNodeType | None = "nav") -> RouteNode | None:
+        """The node closest (Euclidean) to `pos`, optionally restricted to one RouteNodeType."""
+        candidates = [n for n in self.nodes if type is None or n.type == type]
+        if not candidates:
+            return None
+        p = np.asarray(pos, np.float32)
+        d = [float(np.linalg.norm(np.asarray(n.pos, np.float32) - p)) for n in candidates]
+        return candidates[int(np.argmin(d))]
+
+    def geodesic_distance(self, pos_a, pos_b) -> float:
+        """Free-space distance proxy between two arbitrary points: project each onto its
+        nearest nav node, run Dijkstra between them, and floor the result at the straight-line
+        Euclidean separation -- a node-graph geodesic under-reports (even 0) when two points
+        share a nearest node, same fix already validated in
+        experiments/area-cluster-02/cluster_areas.py's object-clustering distance."""
+        eu = float(np.linalg.norm(np.asarray(pos_a, np.float64) - np.asarray(pos_b, np.float64)))
+        na, nb = self.nearest_node(pos_a), self.nearest_node(pos_b)
+        if na is None or nb is None:
+            return eu
+        geo = self.shortest_path(na.id, nb.id)
+        return max(geo, eu) if np.isfinite(geo) else eu
+
+    def geodesic_distances_from(self, pos, targets: dict) -> dict:
+        """Same proxy as geodesic_distance, but one source -> many targets: runs Dijkstra ONCE
+        from `pos`'s nearest nav node instead of once per target. `targets`: {key: pos}. Returns
+        {key: distance}."""
+        from scipy.sparse.csgraph import dijkstra
+        if not targets:
+            return {}
+        src = self.nearest_node(pos)
+        if src is None:
+            return {k: float(np.linalg.norm(np.asarray(pos, np.float64) - np.asarray(p, np.float64)))
+                    for k, p in targets.items()}
+        csr, idx = self._csr()
+        dist = dijkstra(csr, directed=False, indices=idx[src.id])
+        out = {}
+        for k, p in targets.items():
+            eu = float(np.linalg.norm(np.asarray(pos, np.float64) - np.asarray(p, np.float64)))
+            nt = self.nearest_node(p)
+            geo = float(dist[idx[nt.id]]) if nt is not None else float("inf")
+            out[k] = max(geo, eu) if np.isfinite(geo) else eu
+        return out
+
+    def geodesic_distance_fn(self, from_pos, targets: dict) -> Callable[[object], float]:
+        """Convenience wrapper around geodesic_distances_from: builds a
+        herald.scene.plan.descent.descend()-compatible `distance_fn(pos) -> meters` closure.
+        Keyed by a rounded-position lookup rather than dict identity/uid, since callers may pass
+        a target's position by value rather than the exact same object (e.g.
+        plan_route_iterative() re-derives it fresh each step)."""
+        dists = self.geodesic_distances_from(from_pos, targets)
+
+        def _key(pos) -> tuple:
+            return tuple(np.round(np.asarray(pos, np.float64), 6))
+
+        by_key = {_key(targets[k]): d for k, d in dists.items()}
+
+        def distance_fn(pos) -> float:
+            return by_key[_key(pos)]
+
+        return distance_fn
+
+    def add_poi(self, id: str, scene_uid: int, pos) -> RouteNode:
+        """Register a POI route-node for a SceneNode (e.g. an area) at `pos`, wired into the nav
+        graph via an edge to its nearest existing nav-node -- a POI with no edge would be
+        unreachable by shortest_path_nodes. `id` must be unique among this graph's node ids."""
+        node = RouteNode(id=id, pos=Vec3(pos), type="poi", poi_uid=scene_uid)
+        self.nodes.append(node)
+        nearest = self.nearest_node(pos, type="nav")
+        if nearest is not None:
+            self.edges.append(RouteEdge(node.id, nearest.id, "derived"))
+        return node
 
     def to_dict(self) -> dict[str, Any]:
         return {"nodes": [n.to_dict() for n in self.nodes], "edges": [e.to_dict() for e in self.edges]}
