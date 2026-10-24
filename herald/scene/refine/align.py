@@ -264,3 +264,252 @@ def align(source: np.ndarray, target: np.ndarray, *,
 def align_sessions(src_result, tgt_result, **kw) -> AlignResult:
     """Convenience: align two SessionResult clouds (`.points`)."""
     return align(src_result.points, tgt_result.points, **kw)
+
+
+# ------------------------------------------------------------- anchored (contour) alignment
+#
+# `align()` above (point-cloud vs. point-cloud) is the default, unchanged Tier-2 registration
+# path -- fast, already proven on every TartanGround env tested. The functions below are an
+# ADDITIONAL, opt-in path for the case `align()` alone handles poorly: a new session with LOW
+# real overlap against the persistent map, where cloud-to-cloud correlation has little true
+# signal to lock onto. They anchor against a `herald.scene.refine.contour`-extracted building
+# footprint (a synthetic OSM substitute for datasets with no real floor-plan feed) IN ADDITION
+# TO the persistent cloud, not instead of it. Validated on JapaneseCity this session: a
+# low-overlap case that single-shot cloud-only alignment missed by 14.9m came down to 1.35m with
+# this recipe. That is ONE validated case with a real but NARROW optimum (nearby hyperparameter
+# settings were measurably worse, see `anchored_align`'s docstring) -- opt-in via `--mode
+# anchored` in scripts/scene_align.py, not a silent default-behavior change.
+
+def high_freq_points(pts_flat: np.ndarray, cell_size: float = 0.1, sigma_cells: float = 1.5,
+                      norm_percentile: float = 98.0, keep_percentile: float = 80.0) -> np.ndarray:
+    """Filter a (flattened, z=0) point cloud down to its own top-density-percentile points --
+    the alignment TARGET this whole recipe depends on. Raw/dense clouds have repeated structure
+    (a street grid, similar facade segments) that creates a false, sometimes-deeper correlation
+    minimum (confirmed empirically: different sigma schedules disagreeing on even the sign of
+    the recovered yaw); this keeps real point density/character (unlike a synthetic edge
+    skeleton, which gave zero-signal blind search) while filtering out low-signal floor/clutter
+    points."""
+    from herald.scene.refine.contour import flatten_to_grid
+
+    likelihood, counts, ox, oy = flatten_to_grid(pts_flat[:, :2], cell_size, sigma_cells=sigma_cells,
+                                                  norm_percentile=norm_percentile)
+    xi = np.clip(((pts_flat[:, 0] - ox) / cell_size).astype(np.int64), 0, likelihood.shape[0] - 1)
+    yi = np.clip(((pts_flat[:, 1] - oy) / cell_size).astype(np.int64), 0, likelihood.shape[1] - 1)
+    point_density = likelihood[xi, yi]
+    thresh = np.percentile(point_density[point_density > 0], keep_percentile)
+    return pts_flat[point_density >= thresh]
+
+
+@dataclass
+class ReversedAlignResult:
+    transform: Sim3
+    yaw: float
+    energy: float
+    history: list = None          # list[Sim3], best-so-far checkpoint at each recorded refine step
+    coarse_history: list = None   # list[Sim3], best-so-far checkpoint during the BLIND GRID SEARCH
+                                   # that happens BEFORE refinement (see reversed_align's docstring)
+
+
+def reversed_align(source: np.ndarray, target: np.ndarray, *,
+                    sigmas: tuple[float, ...] = (1.0, 0.4), field_vox: float = 0.05,
+                    yaw_search_deg: float = 45.0, t_search_radius: float = 11.0,
+                    yaw_seeds: int = 36, t_res: float = 1.0, iters: int = 40, lr: float = 0.05,
+                    src_points: int = 4000, target_points: int = 8000, topk: int = 3,
+                    lambda_psi: float = 0.0, seed: int = 0, verbose: bool = False,
+                    record: bool = False, rec_stride: int = 2) -> ReversedAlignResult:
+    """Build the kernel-correlation potential field from the (small) SOURCE crop instead of the
+    (large) target, then query it with the TARGET points transformed by T^-1 -- mathematically
+    equivalent to `align()`'s forward formulation for a rigid transform (||T(q)-c|| =
+    ||q-T^-1(c)|| when T is pure rotation+translation), but memory use is independent of the
+    target's extent (a whole-city or whole-persistent-map target would OOM the forward
+    formulation's field, which is built over the TARGET's bounding box -- confirmed empirically).
+    `lambda_psi`: MAP-style soft yaw penalty toward 0 correction, normalized per-sigma-stage by
+    that stage's own peak achievable energy (a bare constant is wrong: energy magnitude scales
+    with sigma)."""
+    rng = np.random.default_rng(seed)
+    import torch
+
+    Snp = _subsample(source, src_points, rng)   # heat source (small crop) -- builds the field
+    Tnp = _subsample(target, target_points, rng)  # queried, via T^-1, against that field
+    dev = torch.device("cpu")
+
+    fields = {sig: _Field(Snp, sig, field_vox, dev) for sig in sigmas}
+    peak_energy = {sig: abs(float(fields[sig].E.min())) for sig in sigmas}
+    C = torch.as_tensor(Tnp, dtype=torch.float32, device=dev)
+    cq = Snp[:, :2].mean(0)   # source centroid, for the same rc-recentering trick as align()
+
+    def inv_transform(psi, t):
+        # T(x) = R(psi) x + t  =>  T^-1(y) = R(psi)^T (y - t) = R(-psi) (y - t)
+        cz, sz = torch.cos(-psi), torch.sin(-psi)
+        shifted = C - t
+        x, y, z = shifted[:, 0], shifted[:, 1], shifted[:, 2]
+        return torch.stack([cz * x - sz * y, sz * x + cz * y, z], 1)
+
+    def compose(psi, t_vec) -> Sim3:
+        cz, sz = np.cos(psi), np.sin(psi)
+        Rz = np.array([[cz, -sz, 0], [sz, cz, 0], [0, 0, 1]], np.float32)
+        return Sim3(1.0, Rz.astype(np.float64), t_vec.astype(np.float64))
+
+    coarse_sigma = max(sigmas)
+    cand = []
+    # `coarse_hist` records the RUNNING BEST candidate found so far, in the order the blind grid
+    # is actually swept (yaw outer loop, x/y inner) -- lets a caller animate the search itself
+    # ("many candidates tried, occasionally a better one found") rather than jumping straight
+    # from the noisy start to the refinement phase, which otherwise hides most of what the
+    # method actually does before gradient descent even begins.
+    coarse_hist = [] if record else None
+    coarse_best = None
+    # search centered on the source's OWN centroid (bug found and fixed during development: this
+    # was centered on the world origin (0,0) before, so a crop far from the origin never explored
+    # anywhere near the truth)
+    gx = np.arange(cq[0] - t_search_radius, cq[0] + t_search_radius + 1e-6, t_res)
+    gy = np.arange(cq[1] - t_search_radius, cq[1] + t_search_radius + 1e-6, t_res)
+    with torch.no_grad():
+        for psi0 in np.linspace(-np.deg2rad(yaw_search_deg), np.deg2rad(yaw_search_deg), yaw_seeds):
+            cz, sz = np.cos(psi0), np.sin(psi0)
+            rc = np.array([cz * cq[0] - sz * cq[1], sz * cq[0] + cz * cq[1]])
+            psi_t = torch.tensor(float(psi0), device=dev)
+            for gxx in gx:
+                for gyy in gy:
+                    t_vec = np.array([gxx - rc[0], gyy - rc[1], 0.0], np.float32)
+                    t_t = torch.tensor(t_vec, dtype=torch.float32, device=dev)
+                    e = float(fields[coarse_sigma].energy(inv_transform(psi_t, t_t)))
+                    e += lambda_psi * peak_energy[coarse_sigma] * float(psi0) ** 2
+                    cand.append((e, float(psi0), t_vec))
+                    if record and (coarse_best is None or e < coarse_best[0]):
+                        coarse_best = (e, float(psi0), t_vec)
+                        coarse_hist.append(compose(coarse_best[1], coarse_best[2]))
+    cand.sort(key=lambda c: c[0])
+    if verbose:
+        print(f"  coarse best: yaw={np.degrees(cand[0][1]):.1f} e={cand[0][0]:.4f} "
+              f"({len(coarse_hist) if coarse_hist else 0} improving steps out of {len(cand)} tried)",
+              flush=True)
+
+    # More refine iterations was found to make results WORSE, not better (Adam's adaptive
+    # step-size normalization keeps taking near-full-sized steps even once the true gradient is
+    # ~0, so a good solution can drift away given enough extra steps). Fix: track the BEST
+    # (lowest finest-sigma energy) snapshot seen at ANY point during optimization, not just
+    # wherever the optimizer ends up -- standard early-stopping-by-best-checkpoint, makes extra
+    # iterations strictly non-harmful.
+    fine_sigma = sigmas[-1]
+    best = None
+    best_hist = None
+    for e0, psi0, t0 in cand[:topk]:
+        psi = torch.tensor(float(psi0), device=dev, requires_grad=True)
+        t = torch.tensor(t0, dtype=torch.float32, device=dev, requires_grad=True)
+        opt = torch.optim.Adam([psi, t], lr=lr)
+        best_this_run = None
+        hist, step = ([compose(float(psi.item()), t.detach().cpu().numpy())] if record else None), 0
+        for sig in sigmas:
+            lam_sig = lambda_psi * peak_energy[sig]
+            for _ in range(iters):
+                opt.zero_grad()
+                loss = fields[sig].energy(inv_transform(psi, t)) + lam_sig * psi ** 2
+                loss.backward()
+                opt.step()
+                with torch.no_grad():
+                    e_fine = float(fields[fine_sigma].energy(inv_transform(psi, t)))
+                if best_this_run is None or e_fine < best_this_run[0]:
+                    best_this_run = (e_fine, float(psi.item()), t.detach().cpu().numpy().copy())
+                if record and step % rec_stride == 0:
+                    hist.append(compose(*best_this_run[1:]))
+                step += 1
+        e, psi_val, t_val = best_this_run
+        if verbose:
+            print(f"  refine yaw0={np.degrees(psi0):.1f} -> best_yaw={np.degrees(psi_val):.1f} e={e:.4f} "
+                  f"(final was yaw={np.degrees(psi.item()):.1f})", flush=True)
+        if best is None or e < best[0]:
+            best = (e, psi_val, t_val)
+            best_hist = hist
+
+    e, psi, t_vec = best
+    T = compose(psi, t_vec)
+    if record and (not best_hist or not np.allclose(best_hist[-1].t, T.t)):
+        best_hist.append(T)
+    return ReversedAlignResult(transform=T, yaw=psi, energy=e, history=best_hist if record else None,
+                                coarse_history=coarse_hist if record else None)
+
+
+def local_contour(contour_pts: np.ndarray, center_xy: np.ndarray, radius: float) -> np.ndarray:
+    """Restrict a (whole-map) contour to a local neighborhood around the source cloud being
+    placed. A full-map contour has repeated/periodic structure (a street grid, similar facade
+    segments) that can pull the optimizer toward a distant-but-locally-identical false match
+    even at a small mixing weight -- a real OSM/contour anchor would realistically be queried
+    locally around a pose prior anyway, not matched blindly against the entire map."""
+    d = np.linalg.norm(contour_pts[:, :2] - center_xy, axis=1)
+    sel = contour_pts[d <= radius]
+    return sel if len(sel) >= 20 else contour_pts
+
+
+def weighted_target(contour_local: np.ndarray, pool: np.ndarray | None, w_contour: float,
+                     w_cloud: float, n_total: int, rng: np.random.Generator) -> np.ndarray:
+    """Mix `n_total` target points from the local contour and the persistent-map cloud pool by
+    weight (approximating a weighted-sum-of-energies objective via point density). `pool=None`
+    (nothing persisted yet, e.g. the very first session) falls back to contour-only."""
+    if pool is None or len(pool) == 0:
+        return contour_local
+    n_c = int(round(n_total * w_contour))
+    n_p = n_total - n_c
+    c_idx = rng.choice(len(contour_local), min(n_c, len(contour_local)), replace=len(contour_local) < n_c)
+    # high-freq filter the cloud pool too (same target as reversed_align's own recipe) -- a raw
+    # pool reintroduces the repeated-structure false-minimum risk local_contour() fixes above.
+    pool_f = high_freq_points(pool) if len(pool) > 2000 else pool
+    p_idx = rng.choice(len(pool_f), min(n_p, len(pool_f)), replace=len(pool_f) < n_p)
+    return np.concatenate([contour_local[c_idx], pool_f[p_idx]])
+
+
+def anchored_align(source: np.ndarray, contour: np.ndarray, persistent: np.ndarray | None, *,
+                    w_contour: float = 0.3, w_cloud: float = 0.7, contour_radius: float = 70.0,
+                    max_yaw_deg: float = 30.0, max_t: float = 8.0, refine_yaw_window: float = 9.0,
+                    lambda_psi: float = 0.01, field_vox: float = 0.1, src_points: int = 5000,
+                    target_points: int = 6000, iters: int = 80, yaw_seeds: int = 36, topk: int = 3,
+                    seed: int = 0) -> ReversedAlignResult:
+    """Two-stage anchored alignment for the LOW-overlap case `align()` handles poorly: a new
+    session's `source` cloud has too little real overlap with `persistent` for cloud-to-cloud
+    correlation alone to find the true pose, so this also anchors against `contour` (a
+    `herald.scene.refine.contour`-extracted building footprint).
+
+    Stage A: contour-only, WIDE search -- gets yaw roughly right but leaves translation badly
+    wrong (empirically: a straight local facade segment pins orientation but not position along
+    it -- a translation-aperture problem, not a not-enough-context one; error stuck at ~14-15m
+    across every contour radius tried). Stage B: apply stage A's fix, then refine with a NARROW
+    yaw search (a wide blind search with cloud mixed in consistently lands ~70deg off -- a
+    strong false attractor) using the contour+persistent-cloud mixed target to pin down
+    translation.
+
+    Validated on JapaneseCity this session: w_contour=0.3, refine_yaw_window=+/-9deg takes a
+    case `align()`/single-shot `reversed_align()` missed by 14.9m down to 1.35m. That is ONE
+    validated case with a real but NARROW optimum -- nearby settings (w_contour=0.2 or 0.4,
+    window=6 or 12) were measurably worse (7-17m, not 1-2m) -- so treat this as a validated fix
+    for a specific failure mode, not a broadly-robust general recipe yet. Also found empirically
+    to HURT the high-overlap case (0.47m -> 3.6m) by unnecessarily constraining a search that
+    didn't need constraining -- callers should fall back to `reversed_align()`/`align()` alone
+    when overlap with `persistent` is not low.
+
+    This landscape is also seed-sensitive: stage B must use `seed` (matching stage A) + 1, and a
+    FIXED/independent rng (not derived from any per-call seed) for `weighted_target()`'s
+    subsampling -- both confirmed empirically during development; other seed offsets reproduced
+    neither this result nor the single-shot baseline.
+    """
+    centroid = source[:, :2].mean(0)
+    c_local = local_contour(contour, centroid, contour_radius)
+    resA = reversed_align(source, c_local, sigmas=(1.0, 0.4), field_vox=field_vox,
+                           yaw_search_deg=max_yaw_deg + 15, t_search_radius=max_t + 3.0,
+                           yaw_seeds=yaw_seeds, iters=iters, lambda_psi=lambda_psi,
+                           src_points=src_points, target_points=target_points, topk=topk,
+                           seed=seed, record=True, rec_stride=2, verbose=False)
+    if persistent is None or len(persistent) == 0:
+        return resA   # first session ever: contour-only bootstrap, nothing to mix in yet
+
+    partial = resA.transform.apply(source)
+    tgt_rng = np.random.default_rng(999)   # fixed/independent -- see docstring
+    tgt = weighted_target(c_local, persistent, w_contour, w_cloud, target_points, tgt_rng)
+    resB = reversed_align(partial, tgt, sigmas=(1.0, 0.4), field_vox=field_vox,
+                           yaw_search_deg=refine_yaw_window, t_search_radius=max_t + 3.0,
+                           yaw_seeds=yaw_seeds, iters=iters, lambda_psi=lambda_psi,
+                           src_points=src_points, target_points=target_points, topk=topk,
+                           seed=seed + 1, record=True, rec_stride=2, verbose=False)
+    T_total = resB.transform @ resA.transform
+    history = list(resA.history) + [T @ resA.transform for T in resB.history]
+    return ReversedAlignResult(transform=T_total, yaw=resB.yaw, energy=resB.energy, history=history,
+                                coarse_history=resA.coarse_history)

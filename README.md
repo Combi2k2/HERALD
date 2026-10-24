@@ -114,6 +114,41 @@ Areas: `--d-max` (area diameter cap) · `--linkage` · `--mirror-adj`/`--gate-ma
 disambiguation). Render: portals are magenta bboxes, doors solid magenta panels, the route graph
 grey with portal-cut edges in red; click any object/door/portal for its crops.
 
+### Anchored alignment (experimental)
+
+`scene_align.py --mode anchored --contour <path>` is an opt-in alternative to the default
+point-cloud-only `align()`, for a session with LOW real overlap against the persistent map
+(where cloud-to-cloud correlation alone has little true signal to lock onto). It also anchors
+against a building-footprint contour — a synthetic OSM substitute extracted from the persistent
+cloud itself (`scene_extract_contour.py`, since TartanGround has no real floor-plan feed):
+
+```bash
+uv run python scripts/scene_extract_contour.py --persistent $S/persistent.npz --out $S/contour.json
+uv run python scripts/scene_align.py --session $REC/session_P0001.npz --persistent $S/persistent.npz \
+  --out $S/sim3_P0001.json --mode anchored --contour $S/contour.json
+```
+
+Validated on one real low-overlap case (14.9m → 1.35m); nearby hyperparameters were measurably
+worse and it was found to HURT the high-overlap case if used there — see
+`herald.scene.refine.align.anchored_align()`'s docstring before relying on it for a new
+environment. Default mode is unaffected.
+
+### Query → plan (NL retrieval + path planning)
+
+`scene_plan.py` resolves a free-text request against the area/object `SceneGraph` into a visit
+sequence and nav-graph path: mixed semantic+geodesic area retrieval
+(`herald.scene.plan.descent.descend()`), one LLM call to order the shortlist
+(`herald.scene.plan.order.order_route()`), then shortest-path routing
+(`RouteGraph.shortest_path_nodes`). `--n-required N` sizes the retrieval shortlist adaptively
+(`k = 2N + 1`) instead of a fixed `--k` — trades single-destination precision for
+multi-destination recall, validated per `experiments/planner-eval-01/result.md`.
+
+```bash
+uv run python scripts/scene_plan.py "bring me a wheelchair and take me to the reception desk" \
+  --graph $S/scene_graph.json --route $S/route.json \
+  --robot-pos 0 0 0 --n-required 2 --geodesic
+```
+
 ## Cluster / GPU (SLURM)
 
 Heavy jobs run via `scripts/*.slurm` (`sbatch`, override config with `--export=ALL,KEY=val,...`).

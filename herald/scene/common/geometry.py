@@ -262,3 +262,10 @@ class Sim3:
         out[..., :3, :3] = self.R @ out[..., :3, :3]
         out[..., :3, 3] = self.s * out[..., :3, 3] @ self.R.T + self.t
         return out
+
+    def __matmul__(self, other: Sim3) -> Sim3:
+        """Compose two Sim3s: (self @ other).apply(x) == self.apply(other.apply(x)), i.e.
+        `other` is applied first. Used by herald.scene.refine.align's two-stage anchored
+        alignment to fold a coarse-search correction and a refine-search correction into one
+        transform without re-deriving the composition at each call site."""
+        return Sim3(self.s * other.s, self.R @ other.R, self.s * (self.R @ other.t) + self.t)
