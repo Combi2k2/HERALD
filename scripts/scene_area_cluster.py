@@ -59,8 +59,17 @@ def main() -> None:
     edges = [(nidx[e.source_id], nidx[e.target_id]) for e in route.edges]
 
     # 1. mirror -> portal: camera walked through its gate, or it is adjacent to a door
-    door_c = C[[i for i, l in enumerate(labels) if l == "door"]]
-    portal = [l == PORTAL for l in labels]
+    #
+    # Both `door_c` and the initial `portal` mask used to exact-match "door"/PORTAL only, which
+    # silently matched NOTHING on environments whose TartanGround segmentation class isn't
+    # literally "door" (e.g. JapaneseCity's real class is "glassdoor") -- door objects then never
+    # acted as route-graph gates (no edges got cut for them) even after being excluded from area
+    # membership via --drop-labels, so areas ended up NOT actually separated by real doors, only
+    # by the rare reclassified-mirror case. Substring match fixes both call sites; --drop-labels
+    # still controls area MEMBERSHIP (a separate concern) and needs its own matching value.
+    is_door = [("door" in l.lower() or "entrance" in l.lower()) for l in labels]
+    door_c = C[[i for i, is_d in enumerate(is_door) if is_d]]
+    portal = list(is_door)
     n_through = n_near = 0
     for i, l in enumerate(labels):
         if l != "mirror":
@@ -75,7 +84,9 @@ def main() -> None:
     for i in portal_ix:                                        # mark for the renderer
         objs[i].attrs["is_portal"] = True
         objs[i].attrs["gate_margin"] = args.gate_margin
-    print(f"portals: {len(portal_ix)} (mirror->portal: {n_through} walk-through, {n_near} near-door)", flush=True)
+    n_door = sum(is_door)
+    print(f"portals: {len(portal_ix)} ({n_door} door/entrance-labeled + "
+          f"mirror->portal: {n_through} walk-through, {n_near} near-door)", flush=True)
 
     # 2. cut route edges crossing a portal gate
     gates = [(C[i], R[i], H[i]) for i in portal_ix]
@@ -101,24 +112,33 @@ def main() -> None:
         csr = csr_matrix((np.concatenate([w, w]), (rows, cols)), shape=(M, M))
     else:
         csr = csr_matrix((M, M))
-    all_src = sorted({a for ns in node_sets for a in ns})
-    src_row = {a: r for r, a in enumerate(all_src)}
-    grows = dijkstra(csr, directed=False, indices=all_src)                  # (S, M)
     N = len(keep)
-    # cost to reach every route node from object i = min_a (offset_ia + geodesic(a, node))
-    reach = np.stack([(grows[[src_row[a] for a in ns]] + offw[k][:, None]).min(axis=0)
-                      for k, ns in enumerate(node_sets)])                   # (N, M)
-    geo = np.empty((N, N))
-    for j, ns in enumerate(node_sets):
-        geo[:, j] = (reach[:, ns] + offw[j][None, :]).min(axis=1)           # + far-end offset
-    geo = np.minimum(geo, geo.T)
-    Dm = np.where(np.isinf(geo), BIG, geo)                                  # inf across portals -> BIG
-    np.fill_diagonal(Dm, 0.0)
-    lab = AgglomerativeClustering(n_clusters=None, distance_threshold=args.d_max,
-                                  metric="precomputed", linkage=args.linkage).fit_predict(Dm)
-    n_area = int(lab.max()) + 1
-    sizes = np.bincount(lab, minlength=n_area)
-    print(f"areas {n_area} | singletons {int((sizes == 1).sum())} | largest {sizes.max()}", flush=True)
+    if N == 0:
+        # every object got dropped (e.g. all classified as portals) -- no area-content objects
+        # to cluster. Not an error: emit a valid graph with 0 areas rather than crash (np.stack
+        # on an empty list); objects (portals included) are still written as free nodes below.
+        lab = np.zeros(0, dtype=np.int64)
+        n_area = 0
+        print(f"areas {n_area} | no non-portal objects to cluster ({len(objs)} objects total, "
+              f"all dropped as {sorted(drop)})", flush=True)
+    else:
+        all_src = sorted({a for ns in node_sets for a in ns})
+        src_row = {a: r for r, a in enumerate(all_src)}
+        grows = dijkstra(csr, directed=False, indices=all_src)              # (S, M)
+        # cost to reach every route node from object i = min_a (offset_ia + geodesic(a, node))
+        reach = np.stack([(grows[[src_row[a] for a in ns]] + offw[k][:, None]).min(axis=0)
+                          for k, ns in enumerate(node_sets)])                # (N, M)
+        geo = np.empty((N, N))
+        for j, ns in enumerate(node_sets):
+            geo[:, j] = (reach[:, ns] + offw[j][None, :]).min(axis=1)       # + far-end offset
+        geo = np.minimum(geo, geo.T)
+        Dm = np.where(np.isinf(geo), BIG, geo)                              # inf across portals -> BIG
+        np.fill_diagonal(Dm, 0.0)
+        lab = AgglomerativeClustering(n_clusters=None, distance_threshold=args.d_max,
+                                      metric="precomputed", linkage=args.linkage).fit_predict(Dm)
+        n_area = int(lab.max()) + 1
+        sizes = np.bincount(lab, minlength=n_area)
+        print(f"areas {n_area} | singletons {int((sizes == 1).sum())} | largest {sizes.max()}", flush=True)
 
     # 4. build the area/object SceneGraph
     next_uid = max((o.uid for o in objs), default=0) + 1
