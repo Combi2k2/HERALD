@@ -25,6 +25,37 @@ DEFAULT_VOCAB = [
     "stair", "entrance",
 ]
 
+# Structural/background classes: same set build_gt.py drops before deriving GT objects (not
+# discrete objects, so not worth asking the detector for). Kept in sync with that file's
+# STRUCTURE_DROP by construction (both filter the same seg_label_map.json).
+_STRUCTURE_DROP = {
+    "wall", "floor", "acousticceiling", "sky", "building", "ground", "road", "roof",
+    "railing", "fence", "staircase", "stairs", "instancedfoliageactor", "doorway",
+    "ventilationgrill", "cableduct", "electricalshield",
+}
+# Reserved regardless of GT membership: "entrance" has no TartanGround segmentation class (GT
+# uses "doorway", dropped above as structural) but is Boxer's own portal marker
+# (scene_area_cluster.py's PORTAL="entrance"); "door"/"mirror" ARE real GT classes but are
+# ALSO the two other names scene_area_cluster.py's --drop-labels special-cases -- keeping all
+# three verbatim, from either source, matters downstream regardless of which vocab is active.
+_RESERVED_PORTAL_WORDS = {"door", "entrance", "mirror"}
+
+
+def gt_vocab(root: Path, env: str) -> list[str]:
+    """Detection vocabulary = every non-structural TartanGround segmentation class for `env`
+    (same filter as build_gt.py's keep_ids) plus the reserved portal words. Not hand-picked like
+    DEFAULT_VOCAB -- lets the detector look for everything the ground truth can score against.
+
+    `seg_label_map.json` lives only in the RAW download root, not `--root`'s own tree (which
+    only symlinks in the `Data_omni` frame data, e.g. `data/tartanground` -> `tartanground_data`,
+    whose `<env>/Data_omni` is itself a symlink into the separate raw `tartanground` root) --
+    resolve through that existing symlink rather than hardcoding a second root path."""
+    import json
+    raw_root = (Path(root) / env / "Data_omni").resolve().parent
+    label_map = json.loads((raw_root / "seg_label_map.json").read_text())["name_map"]
+    keep = sorted(set(label_map) - _STRUCTURE_DROP)
+    return sorted(set(keep) | _RESERVED_PORTAL_WORDS)
+
 
 def main() -> None:
     p = argparse.ArgumentParser()
@@ -48,6 +79,10 @@ def main() -> None:
     p.add_argument("--scene-stride", type=int, default=8)
     p.add_argument("--n-crops", type=int, default=3)
     p.add_argument("--device", default="cuda")
+    p.add_argument("--vocab", choices=["default", "gt"], default="default",
+                    help="'default' = hand-picked DEFAULT_VOCAB (~56 words); 'gt' = every "
+                         "non-structural TartanGround segmentation class for --env, plus the "
+                         "reserved portal words (door/entrance/mirror) -- see gt_vocab()")
     args = p.parse_args()
 
     from herald.datasets import TartanGroundGeometry, TartanGroundTraj
@@ -61,7 +96,9 @@ def main() -> None:
         idxs = idxs[: args.max_frames]
     src = GtGeometry(traj, TartanGroundGeometry(traj))
 
-    recon = SessionRecon(DEFAULT_VOCAB, device=args.device, conf_thr2d=args.conf_thr2d,
+    vocab = gt_vocab(args.root, args.env) if args.vocab == "gt" else DEFAULT_VOCAB
+    print(f"vocab: {args.vocab} ({len(vocab)} words)", flush=True)
+    recon = SessionRecon(vocab, device=args.device, conf_thr2d=args.conf_thr2d,
                          conf_thr3d=args.conf_thr3d, iou_thr=args.iou_thr, min_obs=args.min_obs,
                          n_crops=args.n_crops, scene_voxel=args.scene_voxel,
                          scene_stride=args.scene_stride, max_depth=args.max_depth,
