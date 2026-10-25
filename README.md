@@ -1,173 +1,105 @@
+<div align="center">
+
 # HERALD
 
-Site-scale semantic navigation framework. HERALD builds and refines one hierarchical scene
-graph — `site → region/zone → area → object → ego` — in two phases (see `PLAN.md` for the full
-roadmap and `CLAUDE.md` for architecture detail):
+**A robot that builds its own map as it explores — and understands it well enough to answer
+plain-English requests.**
 
-- **Phase 1 — offline scene-graph init:** OpenStreetMap polygons → a `SceneRepr` (graph + nav graph).
-- **Phase 2 — online RGB(-D) reconstruction:** a session's frames → static object OBBs + a colored
-  scene cloud, then multiple sessions reconciled into one persistent map.
+<img src="docs/images/reconstruction.png" width="800" alt="3D map HERALD reconstructed from a robot's camera footage">
 
-## Install
+*The 3D map HERALD reconstructed from nothing but a robot's own camera footage.*
+
+</div>
+
+## What it does
+
+No pre-made floor plan. No manually labeled map. You send a robot through a building with a
+camera, and HERALD turns what it saw into a map that knows **where things are** and **what each
+part of the building is for** — well enough to answer something like:
+
+> *"Help me buy a cola and show me the way to buy a ticket for the train station."*
+
+HERALD finds the vending machine, finds the ticket counter, and plans a route to both.
+
+<div align="center">
+<img src="docs/images/floorplan.png" width="620" alt="Building layout HERALD inferred from its own reconstruction">
+
+*HERALD also figures out the building's own footprint from the same data — no blueprint needed.*
+</div>
+
+## How it works, in short
+
+1. **Explore.** The robot walks through the space once (or many times, on different days) with
+   a camera.
+2. **Remember.** HERALD turns the footage into a 3D map, spotting and remembering every object
+   it sees along the way.
+3. **Stitch it together.** Multiple walk-throughs get merged into one single, consistent map —
+   so the robot's understanding only gets better the more it explores.
+4. **Make sense of the space.** Objects get grouped into named areas ("vending machine area",
+   "waiting room", "ticket counter") and an AI gives each one a plain-English description.
+5. **Ask it anything.** Describe what you need in plain English, and HERALD figures out which
+   area(s) to go to and the actual path to get there.
+
+## Try it
+
+The technical setup and commands to run each step yourself are below. For how it's built
+internally, see [`CLAUDE.md`](CLAUDE.md).
+
+---
+
+## Setup
 
 Dependencies are managed with [uv](https://docs.astral.sh/uv/) (never `pip`/`venv` directly).
-`.venv/` is created on first `uv sync`.
 
 ```bash
+git clone --recurse-submodules <this-repo>
 cd HERALD
-uv sync                          # default groups: dev, viz, vlm
-uv sync --group recon            # + VGGT-Omega geometry + torch/opencv (heavy, CUDA)
-uv sync --group seg              # + SAM2/SigLIP via transformers (heavy, CUDA)
-uv sync --group viewer           # + rerun-sdk (Rerun viewer)
+uv sync                            # core deps
+uv sync --group recon              # + reconstruction (heavy, needs a CUDA GPU)
+uv sync --group viewer             # + Rerun viewer, for visualizing results
+bash third_party/boxer/scripts/download_ckpts.sh   # detector weights (~1.1 GB)
+uv run python scripts/download_tartanground.py --env Hospital --traj P0000 P0001   # demo data
 ```
 
-**Boxer engine (Phase-2 recon).** The detector/tracker lives in the `third_party/boxer` git
-submodule; its checkpoints (~1.1 GB) are not in git. On a fresh clone:
+## Running the pipeline
+
+Five stages, one command each. All of them just read/write files — rendering/visualizing is a
+separate, optional step (`scene_render.py`).
 
 ```bash
-git submodule update --init third_party/boxer     # or clone with --recurse-submodules
-bash third_party/boxer/scripts/download_ckpts.sh   # BoxerNet + DINOv3 + OWLv2 from HuggingFace
-```
+ENV=Hospital; REC=data/tartanground/$ENV/recon; S=data/tartanground/$ENV/scene
 
-**Dataset (Phase-2 demos).** Reconstruction runs on TartanGround:
+# 1. one session's video -> object boxes + a colored 3D map (needs a GPU)
+uv run python scripts/scene_recon.py --env $ENV --traj P0000 --out $REC/session_P0000.npz
 
-```bash
-uv run python scripts/download_tartanground.py     # writes data/tartanground/<Env>/...
-```
-
-## Phase 1 — Scene-graph init (OSM)
-
-Build a hierarchical scene graph from OpenStreetMap: **site → outdoor zones → building zones**,
-with pathway-based outdoor partitioning, and validate it in Rerun/Folium.
-
-```bash
-uv sync --group dev --group viz --group vlm --group viewer
-export HERALD_LAT=48.7128 HERALD_LON=2.2060            # optional fallback if GPS denied
-uv run python scripts/scene_init.py --serve            # browser GPS → ROI picker → build
-uv run python scripts/scene_init.py --bbox 48.710,2.200,48.713,2.203 --serve   # skip picker
-uv run python scripts/scene_init.py --vlm              # vision-LLM classifies each polygon
-uv run python scripts/scene_view.py --run-id 010626_135959    # view a finished run
-```
-
-Each run writes `data/{run_id}/` (timestamp id `ddmmyy_hhmmss`):
-
-```
-data/{run_id}/
-├── raw/     roi.geojson · osm.geojson · map_overlay.html
-└── phase1/  scene_graph.json · pathways.geojson · metadata.json
-```
-
-## Phase 2 — RGB(-D) reconstruction → persistent map
-
-Each session's frames become a `SessionResult` (Tier 1: static object OBBs + scene cloud); the
-sessions are then folded one-by-one into a single **persistent `SceneMap` on disk** (Tier 2) and
-objects are clustered into **portal-bounded areas**. Tier 2 consumes only the saved
-`SessionResult` dumps — never raw frames. Each stage is its own `scene_*` script and only writes
-files to disk; **rendering is a separate step**.
-
-The persistent representation lives under `data/tartanground/<Env>/scene/`:
-
-```
-persistent.npz     accumulating SceneMap (cloud + object OBBs)
-route.json         persistent route graph (nav-node lattice)
-attach.json        object → observing-nav-node attachment
-scene_graph.json   area/object SceneGraph
-sim3_<T>.json      per-session Sim3
-```
-
-### Run it
-
-Per session `T`: recon (GPU) → align → track_obj → merge_route (CPU); then area-cluster once.
-
-```bash
-REC=data/tartanground/Hospital/recon ; S=data/tartanground/Hospital/scene
-
-# Tier 1 (GPU): one video -> SessionResult
-uv run python scripts/scene_recon.py --env Hospital --traj P0000 --out $REC/session_P0000.npz
-
-# Tier 2 (CPU): fold the session into the persistent map
-uv run python scripts/scene_align.py     --session $REC/session_P0000.npz --persistent $S/persistent.npz --out $S/sim3_P0000.json --no-align
-uv run python scripts/scene_track_obj.py --session $REC/session_P0000.npz --persistent $S/persistent.npz --sim3 $S/sim3_P0000.json
+# 2. fold it into the persistent, growing map
+uv run python scripts/scene_align.py --session $REC/session_P0000.npz --persistent $S/persistent.npz \
+  --out $S/sim3_P0000.json --no-align   # --no-align only for the very first session
+uv run python scripts/scene_track_obj.py   --session $REC/session_P0000.npz --persistent $S/persistent.npz --sim3 $S/sim3_P0000.json
 uv run python scripts/scene_merge_route.py --objects $S/persistent.npz --route $S/route.json --attach $S/attach.json --session P0000 --sim3 $S/sim3_P0000.json
+# ... repeat 1-2 for every other session (P0001, P0002, ...) ...
 
-# after ALL sessions: portal-bounded area clustering (+ optional VLM captions)
+# 3. group objects into named areas
 uv run python scripts/scene_area_cluster.py  --objects $S/persistent.npz --route $S/route.json --attach $S/attach.json --out $S/scene_graph.json
-uv run python scripts/scene_area_classify.py --graph $S/scene_graph.json --out $S/scene_graph.json
+uv run python scripts/scene_area_classify.py --graph $S/scene_graph.json --out $S/scene_graph.json   # needs an LLM (Ollama/OpenAI)
 
-# render the persistent representation
+# 4+5. ask a question -> get a destination + route
+uv run python scripts/scene_plan.py "bring me a wheelchair and take me to the reception desk" \
+  --graph $S/scene_graph.json --route $S/route.json --robot-pos 0 0 0 --n-required 2 --geodesic
+
+# see it in Rerun
 uv run python scripts/scene_render.py --objects $S/persistent.npz --graph $S/scene_graph.json --route $S/route.json --out $S/scene.rrd
 ```
 
-The whole flow (recon on GPU per trajectory → integration on CPU → area-cluster) runs via one job:
+The whole flow (all sessions, GPU + CPU stages) also runs as one SLURM job:
 
 ```bash
 sbatch --export=ALL,ENV_NAME=Hospital,TRAJS="P0000 P0001 P0002" scripts/scene_pipeline.slurm
 ```
 
-`--no-align` uses an identity Sim3 — TartanGround global poses are already co-registered; real,
-independently-originated sessions drop it and let `scene_align` recover the Sim3.
+## Learn more
 
-Key knobs — recon: `--conf-thr2d`/`--conf-thr3d` (OWLv2/BoxerNet floors) · `--min-obs` (track
-support) · `--max-range`/`--min-visible` (range + box-visibility gates) · `--corridor-step`
-(dynamic filter). Route: `--spacing` (nav-node spacing) · `--r-connect` (proximity radius).
-Areas: `--d-max` (area diameter cap) · `--linkage` · `--mirror-adj`/`--gate-margin` (portal
-disambiguation). Render: portals are magenta bboxes, doors solid magenta panels, the route graph
-grey with portal-cut edges in red; click any object/door/portal for its crops.
-
-### Anchored alignment (experimental)
-
-`scene_align.py --mode anchored --contour <path>` is an opt-in alternative to the default
-point-cloud-only `align()`, for a session with LOW real overlap against the persistent map
-(where cloud-to-cloud correlation alone has little true signal to lock onto). It also anchors
-against a building-footprint contour — a synthetic OSM substitute extracted from the persistent
-cloud itself (`scene_extract_contour.py`, since TartanGround has no real floor-plan feed):
-
-```bash
-uv run python scripts/scene_extract_contour.py --persistent $S/persistent.npz --out $S/contour.json
-uv run python scripts/scene_align.py --session $REC/session_P0001.npz --persistent $S/persistent.npz \
-  --out $S/sim3_P0001.json --mode anchored --contour $S/contour.json
-```
-
-Validated on one real low-overlap case (14.9m → 1.35m); nearby hyperparameters were measurably
-worse and it was found to HURT the high-overlap case if used there — see
-`herald.scene.refine.align.anchored_align()`'s docstring before relying on it for a new
-environment. Default mode is unaffected.
-
-### Query → plan (NL retrieval + path planning)
-
-`scene_plan.py` resolves a free-text request against the area/object `SceneGraph` into a visit
-sequence and nav-graph path: mixed semantic+geodesic area retrieval
-(`herald.scene.plan.descent.descend()`), one LLM call to order the shortlist
-(`herald.scene.plan.order.order_route()`), then shortest-path routing
-(`RouteGraph.shortest_path_nodes`). `--n-required N` sizes the retrieval shortlist adaptively
-(`k = 2N + 1`) instead of a fixed `--k` — trades single-destination precision for
-multi-destination recall, validated per `experiments/planner-eval-01/result.md`.
-
-```bash
-uv run python scripts/scene_plan.py "bring me a wheelchair and take me to the reception desk" \
-  --graph $S/scene_graph.json --route $S/route.json \
-  --robot-pos 0 0 0 --n-required 2 --geodesic
-```
-
-## Cluster / GPU (SLURM)
-
-Heavy jobs run via `scripts/*.slurm` (`sbatch`, override config with `--export=ALL,KEY=val,...`).
-Hard constraints (see `CLAUDE.md`): use `--partition=3090` (not P100), and clear `PYTHONPATH`
-(`unset PYTHONPATH` / prefix `PYTHONPATH= uv run ...`) so system site-packages don't shadow the
-uv venv. Login nodes have no usable GPU. Job outputs go to `runs/{jobid}/`.
-
-## Repository layout
-
-```
-herald/scene/init/     Phase-1 scene-graph builder
-herald/scene/recon/    Tier-1 per-session recon (SessionRecon, corridor, types, utils)
-herald/scene/refine/   Tier-2 persistent map: align, reconcile, route, portals
-herald/scene/common/   shared domain types (SceneGraph/SceneNode, RouteGraph, SourceRef, Frame, ...)
-herald/scene/semantic.py   object text-label embeddings
-services/              model/integration wrappers (boxer, vggt, osm, vlm, sam2, embeddings)
-scripts/               scene_* entry points + SLURM templates
-third_party/boxer/     Boxer detector/tracker (pinned git submodule)
-```
-
-Run `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 uv run pytest` to run diagnostics without stray system
-plugins (e.g. ROS).
+- [`CLAUDE.md`](CLAUDE.md) — full architecture, every script's flags/knobs, the experimental
+  contour-anchored alignment mode, and cluster/SLURM details.
+- [`PLAN.md`](PLAN.md) — the longer-term roadmap.
+- `experiments/` — the research notebooks behind each validated piece of the pipeline.
