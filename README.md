@@ -63,35 +63,107 @@ uv run python scripts/download_tartanground.py --env Hospital --traj P0000 P0001
 
 ## Running the pipeline
 
-Five stages, one command each. All of them just read/write files — rendering/visualizing is a
-separate, optional step (`scene_render.py`).
+Six short stages, 2-3 commands each. Run them in order, in the same terminal, so the
+`$ENV`/`$REC`/`$S` shortcuts below stay set.
+
+> Screenshots and example output below are all from one real run (Hospital, walkthroughs
+> `P0000`+`P0001`). The query-planning step has no picture of its own — it prints an answer
+> instead, shown as text.
 
 ```bash
-ENV=Hospital; REC=data/tartanground/$ENV/recon; S=data/tartanground/$ENV/scene
-
-# 1. one session's video -> object boxes + a colored 3D map (needs a GPU)
-uv run python scripts/scene_recon.py --env $ENV --traj P0000 --out $REC/session_P0000.npz
-
-# 2. fold it into the persistent, growing map
-uv run python scripts/scene_align.py --session $REC/session_P0000.npz --persistent $S/persistent.npz \
-  --out $S/sim3_P0000.json --no-align   # --no-align only for the very first session
-uv run python scripts/scene_track_obj.py   --session $REC/session_P0000.npz --persistent $S/persistent.npz --sim3 $S/sim3_P0000.json
-uv run python scripts/scene_merge_route.py --objects $S/persistent.npz --route $S/route.json --attach $S/attach.json --session P0000 --sim3 $S/sim3_P0000.json
-# ... repeat 1-2 for every other session (P0001, P0002, ...) ...
-
-# 3. group objects into named areas
-uv run python scripts/scene_area_cluster.py  --objects $S/persistent.npz --route $S/route.json --attach $S/attach.json --out $S/scene_graph.json
-uv run python scripts/scene_area_classify.py --graph $S/scene_graph.json --out $S/scene_graph.json   # needs an LLM (Ollama/OpenAI)
-
-# 4+5. ask a question -> get a destination + route
-uv run python scripts/scene_plan.py "bring me a wheelchair and take me to the reception desk" \
-  --graph $S/scene_graph.json --route $S/route.json --robot-pos 0 0 0 --n-required 2 --geodesic
-
-# see it in Rerun
-uv run python scripts/scene_render.py --objects $S/persistent.npz --graph $S/scene_graph.json --route $S/route.json --out $S/scene.rrd
+ENV=Hospital
+REC=data/tartanground/$ENV/recon
+S=data/tartanground/$ENV/scene
 ```
 
-The whole flow (all sessions, GPU + CPU stages) also runs as one SLURM job:
+### 1. Recon — turn one walkthrough into a 3D map
+
+Reads the raw video for one walkthrough (`P0000`) and writes a colored point cloud with every
+object it spotted boxed. Needs a GPU.
+
+```bash
+uv run python scripts/scene_recon.py --env $ENV --traj P0000 --out $REC/session_P0000.npz
+```
+
+### 2. Merge — fold it into the persistent map
+
+```bash
+uv run python scripts/scene_align.py --session $REC/session_P0000.npz --persistent $S/persistent.npz --out $S/sim3_P0000.json --no-align
+uv run python scripts/scene_track_obj.py --session $REC/session_P0000.npz --persistent $S/persistent.npz --sim3 $S/sim3_P0000.json
+uv run python scripts/scene_merge_route.py --objects $S/persistent.npz --route $S/route.json --attach $S/attach.json --session P0000 --sim3 $S/sim3_P0000.json
+```
+
+Repeat for every other walkthrough (`P0001`, `P0002`, ...), dropping `--no-align` — that flag is
+only for the very first one.
+
+<div align="center">
+<img src="docs/images/reconstruction.png" width="700" alt="Merged 3D map after multiple walkthroughs">
+
+*The persistent map after merging both Hospital walkthroughs.*
+</div>
+
+### 3. Footprint — read the building's own outline off the map
+
+```bash
+uv run python scripts/scene_extract_contour.py --persistent $S/persistent.npz --out $S/contour.json
+```
+
+<div align="center">
+<img src="docs/images/floorplan.png" width="560" alt="Hospital footprint inferred from the reconstructed point cloud">
+
+*HERALD reading the Hospital building's own footprint off the same cloud — no blueprint needed.*
+</div>
+
+### 4. Name — group objects into areas and describe each one
+
+```bash
+uv run python scripts/scene_area_cluster.py --objects $S/persistent.npz --route $S/route.json --attach $S/attach.json --out $S/scene_graph.json
+uv run python scripts/scene_area_classify.py --graph $S/scene_graph.json --out $S/scene_graph.json
+```
+
+Needs an LLM reachable at `--model`/`--model-id` (Ollama or OpenAI).
+
+<div align="center">
+<img src="docs/images/areas.png" width="700" alt="Objects colored by their named area, with the walkable route graph overlaid">
+
+*Every object (dot) colored by the area it was grouped into, with the walkable route graph
+(lines) and doors (diamonds) drawn on top. The AI gave each area a name and description, e.g.
+"Hospital Room," "Public Waiting Area," "Medical Care Area."*
+</div>
+
+### 5. Ask — turn a question into a destination and a route
+
+```bash
+uv run python scripts/scene_plan.py "bring me a wheelchair and take me to the reception desk" --graph $S/scene_graph.json --route $S/route.json --robot-pos 0 0 0 --n-required 2 --geodesic
+```
+
+```
+shortlist (5):
+  area 584  Hospital Room
+  area 594  office space
+  area 577  Office Space
+  area 585  Multifunctional Space
+  area 606  Multifunctional Space
+
+ordered sequence: [584]
+  -> area 584  Hospital Room
+
+path: 64 nav nodes, 71.5m total
+```
+
+### 6. See it
+
+```bash
+uv run python scripts/scene_render.py --objects $S/persistent.npz --graph $S/scene_graph.json --route $S/route.json --out $S/scene.rrd
+uv run rerun $S/scene.rrd
+```
+
+`rerun` opens the same map/areas/route in an interactive 3D viewer — `docs/images/areas.png`
+above is a flattened, static look at the same data.
+
+---
+
+Or run the whole flow (every stage, all sessions) as one SLURM job:
 
 ```bash
 sbatch --export=ALL,ENV_NAME=Hospital,TRAJS="P0000 P0001 P0002" scripts/scene_pipeline.slurm
